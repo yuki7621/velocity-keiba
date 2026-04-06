@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.claude/
+notebooks/
+data/raw/
+*.db
+*.pkl
+.ipynb_checkpoints/

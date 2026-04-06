@@ -1,0 +1,23 @@
+# スクレイピング
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# データ処理
+pandas>=2.2.0
+numpy>=1.26.0
+
+# 機械学習
+lightgbm>=4.3.0
+scikit-learn>=1.4.0
+
+# 可視化
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# ユーティリティ
+tqdm>=4.66.0
+
+# Jupyter (分析用)
+jupyter>=1.0.0
+ipykernel>=6.29.0
