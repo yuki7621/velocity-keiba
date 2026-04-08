@@ -1,0 +1,13 @@
+services:
+  keiba-ai:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      # データとモデルを永続化（コンテナ再起動でも消えない）
+      - keiba-data:/app/data
+      - keiba-models:/app/models
+
+volumes:
+  keiba-data:
+  keiba-models:

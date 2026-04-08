@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# データ (大きいのでGit管理外)
+data/raw/
+data/processed/
+data/*.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# モデル・エクスポート (大きいのでGit管理外)
+models/*.pkl
+exports/
+
+# OS
+Thumbs.db
+.DS_Store
