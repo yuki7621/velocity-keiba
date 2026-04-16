@@ -110,7 +110,7 @@ def run_ev_backtest(
     # 期待値を計算
     # 複勝概算配当 = 単勝オッズ × 0.3
     # 期待値 = AI予測確率 × 概算配当倍率
-    test_df["estimated_fukusho_odds"] = test_df["odds"] * 0.3
+    test_df["estimated_fukusho_odds"] = (test_df["odds"] * 0.3).clip(lower=1.1)
     test_df["expected_value"] = test_df["pred_prob"] * test_df["estimated_fukusho_odds"]
 
     # 期待値が閾値以上の馬に賭ける

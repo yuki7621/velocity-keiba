@@ -1,32 +1,33 @@
 @echo off
+chcp 65001 >nul 2>&1
 echo ================================
-echo   競馬予想AI セットアップ
+echo   Keiba AI Setup
 echo ================================
 echo.
 
-REM Python仮想環境を作成
-echo [1/3] Python仮想環境を作成中...
+REM Python virtual environment
+echo [1/3] Creating Python virtual environment...
 python -m venv .venv
 call .venv\Scripts\activate
 
-REM 依存パッケージをインストール
-echo [2/3] 依存パッケージをインストール中...
+REM Install dependencies
+echo [2/3] Installing dependencies...
 pip install -r requirements.txt streamlit plotly
 
-REM DB初期化
-echo [3/3] データベースを初期化中...
+REM Initialize DB
+echo [3/3] Initializing database...
 python -c "from src.db.schema import create_tables; create_tables()"
 
 echo.
 echo ================================
-echo   セットアップ完了！
+echo   Setup complete!
 echo ================================
 echo.
-echo 起動方法:
-echo   .venv\Scripts\activate
-echo   streamlit run app.py
+echo How to start:
+echo   start.bat
 echo.
-echo データがある場合:
+echo Import data (if available):
+echo   .venv\Scripts\activate
 echo   python scripts\import_data.py exports\keiba_export.tar.gz
 echo.
 pause

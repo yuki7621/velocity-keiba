@@ -26,7 +26,7 @@ NETKEIBA_BASE_URL = "https://db.netkeiba.com"
 
 # 対象年の範囲（デフォルト: 過去5年）
 SCRAPE_YEAR_START = 2021
-SCRAPE_YEAR_END = 2025
+SCRAPE_YEAR_END = 2026
 
 # 競馬場コード (netkeiba)
 VENUE_CODES = {

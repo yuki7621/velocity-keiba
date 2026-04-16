@@ -72,7 +72,7 @@ def _run_backtest(model_name, strategy, thresholds, min_odds, max_odds):
     test_df = test_df[test_df["odds"].notna()].copy()
     test_df = test_df[(test_df["odds"] >= min_odds) & (test_df["odds"] <= max_odds)].copy()
 
-    test_df["fukusho_odds"] = test_df["odds"] * 0.3
+    test_df["fukusho_odds"] = (test_df["odds"] * 0.3).clip(lower=1.1)
     test_df["is_hit"] = (test_df["finish_position"] <= 3).astype(int)
     test_df["market_prob"] = (3.0 / test_df["odds"]).clip(upper=1.0)
     test_df["edge"] = test_df["pred_prob"] - test_df["market_prob"]

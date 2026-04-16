@@ -111,7 +111,7 @@ def predict_and_display(target_date: str):
     target_df["pred_prob"] = model.predict_proba(X)[:, 1]
 
     # 期待値を計算
-    target_df["estimated_fukusho_odds"] = target_df["odds"] * 0.3
+    target_df["estimated_fukusho_odds"] = (target_df["odds"] * 0.3).clip(lower=1.1)
     target_df["expected_value"] = target_df["pred_prob"] * target_df["estimated_fukusho_odds"]
 
     # 市場の暗黙確率との差（エッジ）
