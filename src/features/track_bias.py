@@ -49,11 +49,24 @@ def get_previous_day(
     target_date: str | date,
     venue: str,
     db_path=DB_PATH,
+    max_days: int = 3,
 ) -> str | None:
     """
     指定日の直前の開催日を取得する（通常は前日の土曜日）。
     同じ競馬場で直近に開催された日を探す。
+
+    Args:
+        max_days: この日数以内のデータのみ返す（デフォルト3日=同開催週）。
+                  0 なら制限なし（学習時の後方互換用）。
     """
+    if isinstance(target_date, str):
+        try:
+            target_dt = date.fromisoformat(target_date)
+        except ValueError:
+            return None
+    else:
+        target_dt = target_date
+
     conn = sqlite3.connect(db_path)
     query = """
         SELECT DISTINCT date FROM races
@@ -62,14 +75,33 @@ def get_previous_day(
         ORDER BY date DESC
         LIMIT 1
     """
-    result = conn.execute(query, [venue, str(target_date)]).fetchone()
+    result = conn.execute(query, [venue, str(target_dt)]).fetchone()
     conn.close()
-    return result[0] if result else None
+
+    if result is None:
+        return None
+
+    prev_date_str = result[0]
+
+    # max_days > 0 なら日数制限チェック
+    if max_days > 0:
+        try:
+            prev_dt = date.fromisoformat(prev_date_str)
+            if (target_dt - prev_dt).days > max_days:
+                return None
+        except ValueError:
+            return None
+
+    return prev_date_str
 
 
-def analyze_track_bias(df: pd.DataFrame) -> dict:
+def analyze_track_bias(df: pd.DataFrame, surface: str = None) -> dict:
     """
     1日分のレース結果から馬場傾向を分析する。
+
+    Args:
+        df: レース結果DataFrame
+        surface: "芝" or "ダート" で絞込み。Noneなら全体（後方互換）
 
     Returns:
         {
@@ -82,10 +114,16 @@ def analyze_track_bias(df: pd.DataFrame) -> dict:
             "front_top3_rate": float, # 先行馬の複勝率
             "closer_top3_rate": float, # 差し追込馬の複勝率
             "n_races":       int,    # 分析レース数
+            "surface":       str,    # 分析対象の馬場
         }
     """
+    if surface is not None and "surface" in df.columns:
+        df = df[df["surface"] == surface]
+
     if len(df) == 0:
-        return _empty_bias()
+        result = _empty_bias()
+        result["surface"] = surface or "全体"
+        return result
 
     # ─── 1. 内外バイアス ───
     # 内枠(枠番1-4) vs 外枠(枠番5-8) の複勝率を比較
@@ -160,6 +198,7 @@ def analyze_track_bias(df: pd.DataFrame) -> dict:
         "front_top3_rate": round(front_top3, 4),
         "closer_top3_rate": round(closer_top3, 4),
         "n_races": n_races,
+        "surface": surface or "全体",
     }
 
 
@@ -167,12 +206,16 @@ def get_track_bias_for_date(
     target_date: str | date,
     venue: str,
     db_path=DB_PATH,
+    max_days: int = 3,
 ) -> dict:
     """
     指定日の予測に使う馬場傾向を取得する。
     直前の開催日（通常は土曜）のデータから分析する。
+
+    Args:
+        max_days: 何日前までのデータを「前日」とみなすか（0=制限なし）
     """
-    prev_day = get_previous_day(target_date, venue, db_path)
+    prev_day = get_previous_day(target_date, venue, db_path, max_days=max_days)
     if prev_day is None:
         print(f"  ※ {venue}の前日データが見つかりません。バイアス=0で計算します。")
         return _empty_bias()
@@ -238,7 +281,7 @@ def add_track_bias_features(df: pd.DataFrame, db_path=DB_PATH) -> pd.DataFrame:
         cache_key = (str(dt.date() if hasattr(dt, 'date') else dt), venue)
 
         if cache_key not in bias_cache:
-            bias = get_track_bias_for_date(cache_key[0], venue, db_path)
+            bias = get_track_bias_for_date(cache_key[0], venue, db_path, max_days=0)
             bias_cache[cache_key] = bias
 
         bias = bias_cache[cache_key]
