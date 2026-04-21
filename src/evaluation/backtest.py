@@ -5,6 +5,37 @@ import numpy as np
 from src.model.train import FEATURE_COLUMNS, TARGET_COLUMN, prepare_dataset, get_available_features
 
 
+def _realized_fukusho_payout(df: pd.DataFrame) -> pd.Series:
+    """
+    実現回収率計算用の1票あたり複勝払戻（倍率）。
+
+    優先順:
+      1. `fukusho_odds_actual` (build_featuresが実払戻から生成) — 実データ
+      2. `odds * 0.3` の概算 — フォールバック（実払戻が欠損している場合のみ）
+      3. ハズレ (finish_position > 3) → 0
+
+    これにより「単勝30倍×0.3=9倍で固定」のような架空配当ではなく、
+    現実のJRA複勝配当に基づく ROI を算出できる。
+    """
+    in_top3 = df["finish_position"] <= 3
+
+    if "fukusho_odds_actual" in df.columns:
+        actual = df["fukusho_odds_actual"]
+        # fukusho_odds_actual は build_features 側で「3着内は払戻/100、圏外は0」に整形済み
+        # ただし払戻データ欠損時は (odds*0.3) を入れているので 0 or NaN のケースを補正
+        fallback = (df["odds"] * 0.3).clip(lower=1.1)
+        payout = np.where(
+            in_top3,
+            np.where((actual.notna()) & (actual > 0), actual, fallback),
+            0.0,
+        )
+    else:
+        fallback = (df["odds"] * 0.3).clip(lower=1.1)
+        payout = np.where(in_top3, fallback, 0.0)
+
+    return pd.Series(payout, index=df.index)
+
+
 def run_backtest(
     model,
     df: pd.DataFrame,
@@ -46,13 +77,9 @@ def run_backtest(
     hits = bets[bets["finish_position"] <= 3]
     total_hits = len(hits)
 
-    # 複勝の簡易回収率計算
-    bets["estimated_payout"] = np.where(
-        bets["finish_position"] <= 3,
-        bets["odds"] * 0.3,
-        0,
-    )
-    total_payout = bets["estimated_payout"].sum()
+    # 複勝の実回収率計算（実払戻データを最優先で使用）
+    bets["actual_payout"] = _realized_fukusho_payout(bets)
+    total_payout = bets["actual_payout"].sum()
     roi = total_payout / total_bets * 100
 
     hit_rate = total_hits / total_bets * 100
@@ -127,12 +154,10 @@ def run_ev_backtest(
     total_hits = len(hits)
     hit_rate = total_hits / total_bets * 100
 
-    # 回収率 = 的中した馬の概算配当合計 / 賭け数
-    bets["actual_payout"] = np.where(
-        bets["finish_position"] <= 3,
-        bets["estimated_fukusho_odds"],
-        0,
-    )
+    # 回収率 = 的中した馬の【実配当】合計 / 賭け数
+    # ※ estimated_fukusho_odds は EV 判定用のプロキシであり、
+    #   ROI 計算には実払戻 (fukusho_odds_actual) を使う
+    bets["actual_payout"] = _realized_fukusho_payout(bets)
     total_payout = bets["actual_payout"].sum()
     roi = total_payout / total_bets * 100
 
@@ -216,12 +241,8 @@ def run_value_bet_backtest(
     total_hits = len(hits)
     hit_rate = total_hits / total_bets * 100
 
-    # 回収率
-    bets["actual_payout"] = np.where(
-        bets["finish_position"] <= 3,
-        bets["odds"] * 0.3,
-        0,
-    )
+    # 回収率（実払戻データを使用）
+    bets["actual_payout"] = _realized_fukusho_payout(bets)
     total_payout = bets["actual_payout"].sum()
     roi = total_payout / total_bets * 100
 
