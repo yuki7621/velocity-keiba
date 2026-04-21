@@ -63,7 +63,7 @@ def _render_weekly_check():
     with col1:
         model_name = st.selectbox(
             "モデル",
-            ["lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
+            ["lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
             key="weekly_model",
         )
     with col2:
@@ -104,8 +104,19 @@ def _run_weekly_check(model_name: str, n_weeks: int):
         st.warning("対象期間にデータがありません。")
         return
 
-    # 複勝概算
-    recent["fukusho_odds"] = (recent["odds"] * 0.3).clip(lower=1.1)
+    # 複勝オッズ: 実データがあればそれを使い、なければ概算
+    if "fukusho_odds_actual" in recent.columns and recent["fukusho_odds_actual"].notna().any():
+        recent["fukusho_odds"] = recent["fukusho_odds_actual"]
+        _has_actual = (recent["fukusho_payout"].notna() & (recent["finish_position"] <= 3)).sum()
+        _total_hits = (recent["finish_position"] <= 3).sum()
+        st.caption(f"複勝オッズ: 実払戻データ使用 ({_has_actual}/{_total_hits}件)")
+    else:
+        recent["fukusho_odds"] = np.where(
+            recent["finish_position"] <= 3,
+            (recent["odds"] * 0.3).clip(lower=1.1),
+            0,
+        )
+        st.caption("複勝オッズ: 概算値 (単勝オッズ×0.3) ※実データ取得で精度向上")
     recent["market_prob"] = (3.0 / recent["odds"]).clip(upper=1.0)
     recent["edge"] = recent["pred_prob"] - recent["market_prob"]
 
@@ -298,7 +309,7 @@ def _render_full_diagnosis():
     with col1:
         model_name = st.selectbox(
             "分析するモデル",
-            ["lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
+            ["lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
             key="diag_model",
         )
     with col2:
@@ -561,8 +572,19 @@ def _analyze_features(model, features, df) -> dict:
 def _analyze_value_bet(df: pd.DataFrame) -> dict:
     """バリューベット戦略の実績"""
     df = df.copy()
-    df["fukusho_odds"] = (df["odds"] * 0.3).clip(lower=1.1)
-    df["ev"] = df["pred_prob"] * df["fukusho_odds"]
+    # 実複勝オッズがあればそれを使用、なければ概算
+    if "fukusho_odds_actual" in df.columns and df["fukusho_odds_actual"].notna().any():
+        df["fukusho_odds"] = df["fukusho_odds_actual"]
+    else:
+        df["fukusho_odds"] = np.where(
+            df["finish_position"] <= 3,
+            (df["odds"] * 0.3).clip(lower=1.1),
+            0,
+        )
+    df["ev"] = df["pred_prob"] * np.where(
+        df["fukusho_odds"] > 0, df["fukusho_odds"],
+        (df["odds"] * 0.3).clip(lower=1.1),  # EV計算は概算使用
+    )
     df["market_prob"] = (3.0 / df["odds"]).clip(upper=1.0)
     df["edge"] = df["pred_prob"] - df["market_prob"]
 

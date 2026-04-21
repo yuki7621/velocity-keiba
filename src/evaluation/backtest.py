@@ -2,7 +2,7 @@
 
 import pandas as pd
 import numpy as np
-from src.model.train import FEATURE_COLUMNS, TARGET_COLUMN, prepare_dataset
+from src.model.train import FEATURE_COLUMNS, TARGET_COLUMN, prepare_dataset, get_available_features
 
 
 def run_backtest(
@@ -24,12 +24,13 @@ def run_backtest(
         結果の辞書 (的中率、回収率など)
     """
     df = prepare_dataset(df)
+    features = get_available_features(df)
 
     # 最新20%をテスト期間に
     split_idx = int(len(df) * 0.8)
     test_df = df.iloc[split_idx:].copy()
 
-    X_test = test_df[FEATURE_COLUMNS]
+    X_test = test_df[features]
 
     # 予測確率
     test_df["pred_prob"] = model.predict_proba(X_test)[:, 1]
@@ -94,11 +95,12 @@ def run_ev_backtest(
         max_odds: 最大オッズ（高すぎる大穴を除外）
     """
     df = prepare_dataset(df)
+    features = get_available_features(df)
 
     split_idx = int(len(df) * 0.8)
     test_df = df.iloc[split_idx:].copy()
 
-    X_test = test_df[FEATURE_COLUMNS]
+    X_test = test_df[features]
     test_df["pred_prob"] = model.predict_proba(X_test)[:, 1]
 
     # オッズが欠損・範囲外の行を除外
@@ -180,11 +182,12 @@ def run_value_bet_backtest(
         max_odds: 最大オッズ
     """
     df = prepare_dataset(df)
+    features = get_available_features(df)
 
     split_idx = int(len(df) * 0.8)
     test_df = df.iloc[split_idx:].copy()
 
-    X_test = test_df[FEATURE_COLUMNS]
+    X_test = test_df[features]
     test_df["pred_prob"] = model.predict_proba(X_test)[:, 1]
 
     # オッズフィルタ

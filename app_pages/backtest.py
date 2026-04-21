@@ -25,7 +25,7 @@ def render():
     # ── 設定 ──
     col1, col2 = st.columns(2)
     with col1:
-        model_name = st.selectbox("モデル", ["lightgbm_v3", "lightgbm_v2", "lightgbm_v1"])
+        model_name = st.selectbox("モデル", ["lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"])
         strategy = st.selectbox("戦略", ["バリューベット（エッジ）", "期待値（EV）"])
 
     with col2:
@@ -72,11 +72,20 @@ def _run_backtest(model_name, strategy, thresholds, min_odds, max_odds):
     test_df = test_df[test_df["odds"].notna()].copy()
     test_df = test_df[(test_df["odds"] >= min_odds) & (test_df["odds"] <= max_odds)].copy()
 
-    test_df["fukusho_odds"] = (test_df["odds"] * 0.3).clip(lower=1.1)
+    # 複勝オッズ: 実データがあれば使用、なければ概算
+    if "fukusho_odds_actual" in test_df.columns and test_df["fukusho_odds_actual"].notna().any():
+        test_df["fukusho_odds"] = test_df["fukusho_odds_actual"]
+    else:
+        test_df["fukusho_odds"] = np.where(
+            test_df["finish_position"] <= 3,
+            (test_df["odds"] * 0.3).clip(lower=1.1),
+            0,
+        )
     test_df["is_hit"] = (test_df["finish_position"] <= 3).astype(int)
     test_df["market_prob"] = (3.0 / test_df["odds"]).clip(upper=1.0)
     test_df["edge"] = test_df["pred_prob"] - test_df["market_prob"]
-    test_df["ev"] = test_df["pred_prob"] * test_df["fukusho_odds"]
+    # EV計算は概算オッズを使用（レース前に実複勝オッズは不明のため）
+    test_df["ev"] = test_df["pred_prob"] * (test_df["odds"] * 0.3).clip(lower=1.1)
 
     period = f"{test_df['date'].min().strftime('%Y-%m-%d')} 〜 {test_df['date'].max().strftime('%Y-%m-%d')}"
     st.info(f"テスト期間: **{period}**  |  対象オッズ: {min_odds} 〜 {max_odds}")

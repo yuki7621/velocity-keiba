@@ -70,16 +70,31 @@ def _render_pre_race_prediction():
 
     with col2:
         model_name = st.selectbox(
-            "モデル", ["lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="prerace_model"
+            "モデル", ["lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="prerace_model"
         )
 
     with col3:
         all_venues = ["札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"]
         venue_filter = st.multiselect("競馬場（空欄で全て）", all_venues, key="prerace_venues")
 
+    # ── 馬体重補完オプション（土曜夜の事前予測用）──
+    impute_weight = st.checkbox(
+        "🌙 馬体重が未発表の場合、前走の値で補完する（土曜夜の事前スクリーニング用）",
+        value=False,
+        key="prerace_impute_weight",
+        help=(
+            "当日朝の馬体重発表前でも予測できるようにします。"
+            "前走の馬体重を代理値として使用し、weight_change は 0 と仮定します。"
+            "休み明けの馬では誤差が出やすいので、最終判定は発表後の再予測で行ってください。"
+        ),
+    )
+
     # ── 出馬表取得 & 予測 ──
     if st.button("🔮 出馬表を取得して予測", type="primary", key="btn_prerace"):
-        _run_pre_race_prediction(target_date_str, target_date_input, venue_filter, model_name)
+        _run_pre_race_prediction(
+            target_date_str, target_date_input, venue_filter, model_name,
+            impute_weight=impute_weight,
+        )
 
     # session_stateに結果があれば表示
     if "prerace_results" in st.session_state and st.session_state["prerace_results"] is not None:
@@ -106,8 +121,11 @@ def _repredict_single_race(race_id: str, target_date: str, model_name: str):
     else:
         td = target_date
 
+    # 元の予測実行時のフラグを引き継ぐ（ただし単一再予測は発表後想定なのでデフォルトFalse）
+    impute_weight = bool(st.session_state.get("prerace_results_imputed", False))
+
     with st.spinner(f"{race_id} を再取得中..."):
-        new_feat = _predict_single_race(race_id, td, model)
+        new_feat = _predict_single_race(race_id, td, model, impute_weight=impute_weight)
 
     if new_feat is None or len(new_feat) == 0:
         st.error(f"⚠️ {race_id} の再予測に失敗しました。")
@@ -127,7 +145,12 @@ def _repredict_single_race(race_id: str, target_date: str, model_name: str):
     st.success(f"✅ {race_id} を再予測しました！")
 
 
-def _predict_single_race(race_id: str, target_date: date, model) -> pd.DataFrame | None:
+def _predict_single_race(
+    race_id: str,
+    target_date: date,
+    model,
+    impute_weight: bool = False,
+) -> pd.DataFrame | None:
     """単一レースの出馬表を取得 → 特徴量構築 → 予測。失敗時はNone。"""
     from src.scraper.race_card import scrape_race_card
 
@@ -147,7 +170,7 @@ def _predict_single_race(race_id: str, target_date: date, model) -> pd.DataFrame
         race_info["date"] = str(target_date)
 
     try:
-        feat_df = build_prediction_features(entries, race_info)
+        feat_df = build_prediction_features(entries, race_info, impute_weight=impute_weight)
     except Exception as e:
         st.warning(f"⚠️ {race_id}: 特徴量構築エラー ({e})")
         return None
@@ -171,6 +194,7 @@ def _run_pre_race_prediction(
     target_date: date,
     venues: list[str],
     model_name: str,
+    impute_weight: bool = False,
 ):
     """出馬表を取得し、過去データから特徴量を構築して予測する"""
     import time
@@ -207,7 +231,7 @@ def _run_pre_race_prediction(
     for i, race_id in enumerate(race_ids):
         progress.progress((i + 1) / len(race_ids))
 
-        feat_df = _predict_single_race(race_id, target_date, model)
+        feat_df = _predict_single_race(race_id, target_date, model, impute_weight=impute_weight)
         if feat_df is None:
             time.sleep(SCRAPE_INTERVAL_SEC)
             continue
@@ -235,8 +259,18 @@ def _run_pre_race_prediction(
     st.session_state["prerace_results"] = result_df
     st.session_state["prerace_results_date"] = str(target_date)
     st.session_state["prerace_results_model"] = model_name
+    st.session_state["prerace_results_imputed"] = impute_weight
     st.session_state["prerace_expand_mode"] = "auto"
-    st.success(f"✅ {result_df['race_id'].nunique()} レース・{len(result_df)} 頭の予測が完了しました！")
+
+    # 補完統計
+    if impute_weight and "weight_imputed" in result_df.columns:
+        n_imputed = int(result_df["weight_imputed"].fillna(False).astype(bool).sum())
+        st.success(
+            f"✅ {result_df['race_id'].nunique()} レース・{len(result_df)} 頭の予測が完了しました！"
+            f"（うち {n_imputed} 頭は前走馬体重で補完）"
+        )
+    else:
+        st.success(f"✅ {result_df['race_id'].nunique()} レース・{len(result_df)} 頭の予測が完了しました！")
 
 
 def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: str):
@@ -248,6 +282,16 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
         if st.button("🗑️ 結果クリア", key="btn_clear_results"):
             st.session_state["prerace_results"] = None
             st.rerun()
+
+    # ── 補完モードの警告バナー ──
+    imputed_flag = bool(st.session_state.get("prerace_results_imputed", False))
+    if imputed_flag and "weight_imputed" in df.columns:
+        n_imputed = int(df["weight_imputed"].fillna(False).astype(bool).sum())
+        n_total = len(df)
+        st.warning(
+            f"🌙 **馬体重補完モードで予測中** — {n_imputed} / {n_total} 頭が前走馬体重で補完されています。\n\n"
+            "これはスクリーニング用の参考値です。確定予測は馬体重発表後（当日朝）に再実行してください。"
+        )
 
     # ── 馬場傾向サマリー（芝/ダート別）──
     st.subheader("📈 前日の馬場傾向")
@@ -354,9 +398,19 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
         else:
             is_expanded = top_prob >= 0.40
 
+        # 確率バッジ（最高予測確率を視覚的に表示）
+        prob_pct = int(top_prob * 100)
+        if top_prob >= 0.50:
+            prob_badge = f"🔥 {prob_pct}%"
+        elif top_prob >= 0.40:
+            prob_badge = f"⭐ {prob_pct}%"
+        else:
+            prob_badge = f"　 {prob_pct}%"
+
         label = f"**{venue} {race_num}R** — {surface}{distance}m ({condition})"
         if title:
             label += f" {title}"
+        label += f"　　{prob_badge}"
 
         with st.expander(label, expanded=is_expanded):
             # ── 再予測ボタン ──
@@ -376,12 +430,16 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
                 else:
                     st.caption(f"✅ 馬体重 全{hw_total}頭取得済み")
 
-            display = race_df[[
+            cols_src = [
                 "post_number", "gate_number", "horse_name", "jockey_name",
-                "weight_carried", "pred_prob",
-            ]].copy()
+                "weight_carried", "horse_weight", "pred_prob",
+            ]
+            # weight_imputed 列が存在すれば含める
+            has_imputed_col = "weight_imputed" in race_df.columns
+            if has_imputed_col:
+                cols_src.append("weight_imputed")
 
-            display.columns = ["馬番", "枠番", "馬名", "騎手", "斤量", "AI確率"]
+            display = race_df[cols_src].copy()
 
             # 推奨マーク
             def _mark(prob):
@@ -393,19 +451,35 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
                     return "★"
                 return ""
 
-            display["推奨"] = display["AI確率"].apply(_mark)
-            display["AI確率"] = display["AI確率"].apply(lambda x: f"{x:.1%}")
-            display["馬番"] = display["馬番"].astype(int)
-            display["枠番"] = display["枠番"].astype(int)
-            display["斤量"] = display["斤量"].apply(
+            display["推奨"] = display["pred_prob"].apply(_mark)
+            display["AI確率"] = display["pred_prob"].apply(lambda x: f"{x:.1%}")
+            display["馬番"] = display["post_number"].astype(int)
+            display["枠番"] = display["gate_number"].astype(int)
+            display["斤量"] = display["weight_carried"].apply(
                 lambda x: f"{x:.1f}" if pd.notna(x) else "-"
             )
 
+            # 馬体重カラム（補完時は 🌙 マーク付き）
+            def _fmt_weight(row):
+                hw = row.get("horse_weight")
+                if pd.isna(hw) or not hw:
+                    return "-"
+                imputed = bool(row.get("weight_imputed", False)) if has_imputed_col else False
+                suffix = " 🌙" if imputed else ""
+                return f"{int(hw)}{suffix}"
+
+            display["体重"] = display.apply(_fmt_weight, axis=1)
+            display["馬名"] = display["horse_name"]
+            display["騎手"] = display["jockey_name"]
+
             st.dataframe(
-                display[["枠番", "馬番", "馬名", "騎手", "斤量", "AI確率", "推奨"]],
+                display[["枠番", "馬番", "馬名", "騎手", "斤量", "体重", "AI確率", "推奨"]],
                 use_container_width=True,
                 hide_index=True,
             )
+
+            if has_imputed_col and display.get("weight_imputed", pd.Series([False])).any():
+                st.caption("🌙 = 馬体重未発表のため前走値で補完（参考値）")
 
             # 上位3頭のレーダーチャート的コメント
             top3 = race_df.head(3)
@@ -474,7 +548,7 @@ def _render_db_prediction():
 
     with col3:
         model_name = st.selectbox(
-            "モデル", ["lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="db_model"
+            "モデル", ["lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="db_model"
         )
 
     conn.close()
@@ -623,7 +697,15 @@ def _run_db_prediction(target_date: str, venues: list[str], model_name: str):
         race_num = str(race_id)[-2:]
 
         n_value = len(race_df[race_df["edge"] >= 0.10])
-        value_tag = f" ⭐{n_value}" if n_value > 0 else ""
+        top_prob_db = race_df["pred_prob"].iloc[0]
+        prob_pct_db = int(top_prob_db * 100)
+        if top_prob_db >= 0.50:
+            prob_badge_db = f"🔥 {prob_pct_db}%"
+        elif top_prob_db >= 0.40:
+            prob_badge_db = f"⭐ {prob_pct_db}%"
+        else:
+            prob_badge_db = f"　 {prob_pct_db}%"
+        value_tag = f" / バリュー{n_value}件" if n_value > 0 else ""
 
         if expand_mode_db == "all":
             is_expanded = True
@@ -633,7 +715,7 @@ def _run_db_prediction(target_date: str, venues: list[str], model_name: str):
             is_expanded = n_value > 0
 
         with st.expander(
-            f"**{venue} {race_num}R** — {surface}{distance}m ({condition}){value_tag}",
+            f"**{venue} {race_num}R** — {surface}{distance}m ({condition})　　{prob_badge_db}{value_tag}",
             expanded=is_expanded,
         ):
             display = race_df[[

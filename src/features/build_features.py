@@ -12,11 +12,11 @@ from src.features.track_bias import add_track_bias_features
 # ============================================================
 
 def load_results(db_path=DB_PATH) -> pd.DataFrame:
-    """全結果データを読み込む"""
+    """全結果データを読み込む（実複勝払戻・調教師も結合）"""
     conn = sqlite3.connect(db_path)
     query = """
         SELECT
-            r.race_id, r.horse_id, r.jockey_id,
+            r.race_id, r.horse_id, r.jockey_id, r.trainer_id,
             r.post_number, r.gate_number,
             r.odds, r.popularity, r.weight_carried,
             r.horse_weight, r.weight_change,
@@ -24,16 +24,52 @@ def load_results(db_path=DB_PATH) -> pd.DataFrame:
             r.passing_order, r.prize,
             rc.date, rc.venue, rc.surface, rc.distance,
             rc.condition, rc.grade, rc.head_count,
-            h.sire, h.dam_sire
+            h.sire, h.dam_sire,
+            pf.payout AS fukusho_payout,
+            pt.payout AS tansho_payout
         FROM results r
         JOIN races rc ON r.race_id = rc.race_id
         LEFT JOIN horses h ON r.horse_id = h.horse_id
+        LEFT JOIN payouts pf ON r.race_id = pf.race_id
+            AND r.post_number = pf.horse_number
+            AND pf.bet_type = 'fukusho'
+        LEFT JOIN payouts pt ON r.race_id = pt.race_id
+            AND r.post_number = pt.horse_number
+            AND pt.bet_type = 'tansho'
         WHERE r.finish_position > 0
+          -- 障害レース除外（既存DBに残っている場合のセーフティネット）
+          AND (rc.distance % 100 = 0 OR rc.distance = 1150)
+          AND rc.title NOT LIKE '%障害%'
+          AND rc.title NOT LIKE '%ジャンプ%'
+          AND NOT (rc.distance >= 3000 AND (
+                rc.title LIKE '%J' OR rc.title LIKE '%JS' OR rc.title LIKE '%GJ'
+          ))
+          AND rc.surface != '障害'
         ORDER BY rc.date, r.race_id
     """
     df = pd.read_sql_query(query, conn)
     conn.close()
     df["date"] = pd.to_datetime(df["date"])
+
+    # 実複勝オッズ（100円あたりの払戻 → 倍率に変換）
+    # 3着以内で払戻データがある場合: payout / 100
+    # 3着以内で払戻データがない場合: 概算 odds * 0.3
+    # 4着以下: 0（ハズレ）
+    df["fukusho_odds_actual"] = np.where(
+        df["finish_position"] <= 3,
+        np.where(
+            df["fukusho_payout"].notna(),
+            df["fukusho_payout"] / 100,               # 実データ
+            (df["odds"] * 0.3).clip(lower=1.1),        # 概算フォールバック
+        ),
+        0,
+    )
+    df["tansho_payout_actual"] = np.where(
+        df["tansho_payout"].notna(),
+        df["tansho_payout"] / 100,
+        np.nan,
+    )
+
     return df
 
 
@@ -234,6 +270,50 @@ def add_pace_features(df: pd.DataFrame) -> pd.DataFrame:
 #  7. 騎手の特徴量（ベクトル化版）
 # ============================================================
 
+def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """調教師の通算・条件別成績から特徴量を作成する"""
+    df = df.sort_values(["date", "race_id"]).reset_index(drop=True)
+
+    # trainer_id が未取得（NaN）の場合はNaNのまま返す
+    if "trainer_id" not in df.columns or df["trainer_id"].isna().all():
+        df["trainer_win_rate"] = np.nan
+        df["trainer_top3_rate"] = np.nan
+        df["trainer_recent_top3_20"] = np.nan
+        df["trainer_venue_top3"] = np.nan
+        return df
+
+    # NaNのtrainer_idは "__unknown__" で埋めてグループ化可能にする
+    df["trainer_id"] = df["trainer_id"].fillna("__unknown__")
+
+    g = "trainer_id"
+    df["_t_is_win"] = (df["finish_position"] == 1).astype(float)
+    df["_t_is_top3"] = (df["finish_position"] <= 3).astype(float)
+
+    # 通算成績
+    df["trainer_win_rate"] = _grouped_shift_expanding(df, g, "_t_is_win")
+    df["trainer_top3_rate"] = _grouped_shift_expanding(df, g, "_t_is_top3")
+
+    # 直近20走
+    df["trainer_recent_top3_20"] = _grouped_shift_rolling(df, g, "_t_is_top3", 20, min_periods=5)
+
+    # 調教師×競馬場
+    composite_key = df["trainer_id"].astype(str) + "_" + df["venue"].astype(str)
+    shifted = df["_t_is_top3"].groupby(composite_key).shift(1)
+    df["trainer_venue_top3"] = (
+        shifted.groupby(composite_key).expanding(min_periods=1).mean()
+        .droplevel(0).reindex(df.index)
+    )
+
+    # __unknown__ はNaNに戻す
+    unknown_mask = df["trainer_id"] == "__unknown__"
+    for col in ["trainer_win_rate", "trainer_top3_rate", "trainer_recent_top3_20", "trainer_venue_top3"]:
+        df.loc[unknown_mask, col] = np.nan
+    df.loc[unknown_mask, "trainer_id"] = np.nan
+
+    df.drop(columns=["_t_is_win", "_t_is_top3"], inplace=True)
+    return df
+
+
 def add_jockey_features(df: pd.DataFrame) -> pd.DataFrame:
     """騎手の通算・条件別成績から特徴量を作成する"""
     df = df.sort_values(["date", "race_id"]).reset_index(drop=True)
@@ -266,7 +346,7 @@ def add_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
     """レース内での相対的な位置づけを計算する"""
     df = df.copy()
 
-    for col in ["horse_avg_speed_idx_5", "horse_top3_rate_5", "jockey_win_rate", "odds"]:
+    for col in ["horse_avg_speed_idx_5", "horse_top3_rate_5", "jockey_win_rate", "jockey_top3_rate", "odds"]:
         if col not in df.columns:
             continue
 
@@ -280,6 +360,100 @@ def add_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
 
         df[f"{col}_race_rank"] = df.groupby("race_id")[col].rank(pct=True)
 
+    return df
+
+
+# ============================================================
+#  v4: 高相関特徴量の交互作用
+# ============================================================
+
+def add_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    診断レポートで相関の高い特徴量の交互作用を追加する。
+
+    - horse_top3_rate_5 (corr=+0.2824) × jockey_top3_rate (+0.2516) → 馬×騎手のシナジー
+    - horse_dist_top3_rate (+0.2513) × jockey_top3_rate → 距離適性×騎手
+    - horse_form_trend × jockey_recent_top3_20 → 近走の勢い
+    - horse_avg_speed_idx_5 × horse_dist_top3_rate → スピード×距離適性
+    """
+    df = df.copy()
+
+    # 馬の実力 × 騎手の実力（最も相関の高い2特徴量の積）
+    h_top3 = df.get("horse_top3_rate_5", pd.Series(np.nan, index=df.index))
+    j_top3 = df.get("jockey_top3_rate", pd.Series(np.nan, index=df.index))
+    df["horse_jockey_synergy"] = h_top3 * j_top3
+
+    # 距離適性 × 騎手の実力
+    h_dist = df.get("horse_dist_top3_rate", pd.Series(np.nan, index=df.index))
+    df["horse_dist_jockey"] = h_dist * j_top3
+
+    # 馬の調子 × 騎手の直近調子
+    h_form = df.get("horse_form_trend", pd.Series(0, index=df.index)).fillna(0)
+    j_recent = df.get("jockey_recent_top3_20", pd.Series(np.nan, index=df.index))
+    df["horse_form_x_jockey_recent"] = h_form * j_recent
+
+    # スピード指数 × 距離適性
+    h_speed = df.get("horse_avg_speed_idx_5", pd.Series(np.nan, index=df.index))
+    df["horse_speed_x_dist_apt"] = h_speed * h_dist
+
+    return df
+
+
+# ============================================================
+#  血統特徴量（種牡馬・母父の成績集計）
+# ============================================================
+
+def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
+    """血統（sire / dam_sire）ごとの過去複勝率を特徴量化する。
+
+    リーク防止のため shift(1) → expanding で計算する。
+    学習データに sire/dam_sire が NULL の馬は NaN になる（LightGBM が適切にルーティング）。
+    """
+    df = df.sort_values(["date", "race_id"]).reset_index(drop=True)
+    df["_is_top3_ped"] = (df["finish_position"] <= 3).astype(float)
+    # sprint/mile (<=1800) か middle/long (>1800) かの2値カテゴリ
+    df["_dist_short"] = (df["distance"] <= 1800).astype(int)
+
+    sire = df["sire"].fillna("__unknown__")
+    dam_sire = df["dam_sire"].fillna("__unknown__")
+
+    def _expanding_rate(group_key: pd.Series, min_periods: int) -> pd.Series:
+        shifted = df["_is_top3_ped"].groupby(group_key).shift(1)
+        return (
+            shifted.groupby(group_key)
+            .expanding(min_periods=min_periods)
+            .mean()
+            .droplevel(0)
+            .reindex(df.index)
+        )
+
+    # sire 通算複勝率
+    df["sire_top3_rate"] = _expanding_rate(sire, min_periods=30)
+
+    # sire × 馬場（芝/ダート）
+    key = sire.astype(str) + "_" + df["surface"].astype(str)
+    df["sire_surface_top3"] = _expanding_rate(key, min_periods=20)
+
+    # sire × 距離帯（短中 / 中長）
+    key = sire.astype(str) + "_" + df["_dist_short"].astype(str)
+    df["sire_distcat_top3"] = _expanding_rate(key, min_periods=20)
+
+    # dam_sire 通算複勝率
+    df["dam_sire_top3_rate"] = _expanding_rate(dam_sire, min_periods=30)
+
+    # dam_sire × 馬場
+    key = dam_sire.astype(str) + "_" + df["surface"].astype(str)
+    df["dam_sire_surface_top3"] = _expanding_rate(key, min_periods=20)
+
+    # 未取得の血統は NaN に戻す（"__unknown__" の集計結果は信頼できない）
+    sire_na = df["sire"].isna()
+    for col in ["sire_top3_rate", "sire_surface_top3", "sire_distcat_top3"]:
+        df.loc[sire_na, col] = np.nan
+    dam_na = df["dam_sire"].isna()
+    for col in ["dam_sire_top3_rate", "dam_sire_surface_top3"]:
+        df.loc[dam_na, col] = np.nan
+
+    df.drop(columns=["_is_top3_ped", "_dist_short"], inplace=True)
     return df
 
 
@@ -364,16 +538,25 @@ def build_all_features(db_path=DB_PATH) -> pd.DataFrame:
     _step("[6/9] ペース特徴量を作成中...")
     df = add_pace_features(df)
 
-    _step("[7/9] 騎手の特徴量を作成中...")
+    _step("[7/11] 騎手の特徴量を作成中...")
     df = add_jockey_features(df)
 
-    _step("[8/9] 基本特徴量・レースレベル特徴量を追加中...")
+    _step("[8/11] 調教師の特徴量を作成中...")
+    df = add_trainer_features(df)
+
+    _step("[9/11] 基本特徴量・レースレベル特徴量を追加中...")
     df = add_basic_features(df)
     df = add_rest_pattern(df)
     df = add_race_level_features(df)
 
-    _step("[9/9] 馬場傾向（前日バイアス）を計算中...")
+    _step("[10/12] 馬場傾向（前日バイアス）を計算中...")
     df = add_track_bias_features(df, db_path)
+
+    _step("[11/12] 血統特徴量を計算中...")
+    df = add_pedigree_features(df)
+
+    _step("[12/12] 交互作用特徴量を追加中...")
+    df = add_interaction_features(df)
 
     total = time.time() - t0
     print(f"特徴量構築完了 (列数: {len(df.columns)}, 所要時間: {total:.1f}秒)")

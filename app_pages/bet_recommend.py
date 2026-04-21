@@ -100,11 +100,35 @@ def render():
         key="bet_max_per_type",
     )
 
+    # 的中率優先フィルター
+    with st.expander("🎯 的中率優先フィルター（詳細設定）"):
+        st.caption("AIの予測確率が高い馬だけに絞ることで、的中率を優先できます。回収率は下がる場合があります。")
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            use_prob_filter = st.checkbox(
+                "予測確率フィルターを使用",
+                value=False,
+                key="bet_use_prob_filter",
+                help="チェックすると、Edgeに加えてAI予測確率でも絞り込みます",
+            )
+        with col_f2:
+            min_pred_prob = st.slider(
+                "最低予測確率（top3）",
+                min_value=0.10,
+                max_value=0.80,
+                value=0.35,
+                step=0.05,
+                key="bet_min_pred_prob",
+                help="この確率以上の馬のみ買い目候補に含めます",
+                disabled=not use_prob_filter,
+            )
+
     # ── 実行ボタン ──
     if st.button("🔄 オッズ取得 & 買い目計算", type="primary", key="btn_calc_bets"):
         _calculate_and_display(
             selected_race_id, race_df, budget, ev_threshold,
             bet_types, max_per_type, strategy,
+            min_pred_prob=min_pred_prob if use_prob_filter else None,
         )
 
     # ── 既存の計算結果があれば表示 ──
@@ -113,6 +137,8 @@ def render():
         and st.session_state.get("bet_race_id") == selected_race_id
     ):
         _display_bet_results(st.session_state["bet_results"], budget)
+        if st.session_state.get("bet_prob_filter") is not None:
+            st.caption(f"🎯 的中率優先フィルター適用中: 予測確率 {st.session_state['bet_prob_filter']:.0%} 以上")
 
 
 def _calculate_and_display(
@@ -123,13 +149,24 @@ def _calculate_and_display(
     bet_types: list,
     max_per_type: int,
     strategy: str,
+    min_pred_prob: float | None = None,
 ):
     """オッズ取得 → EV計算 → 予算配分 → 表示"""
 
-    # 1) AI top3確率を辞書化
+    # 1) AI top3確率を辞書化（pred_probフィルター適用）
+    if min_pred_prob is not None:
+        filtered_df = race_df[race_df["pred_prob"] >= min_pred_prob]
+        if len(filtered_df) == 0:
+            st.warning(f"予測確率 {min_pred_prob:.0%} 以上の馬がいません。閾値を下げてください。")
+            filtered_df = race_df  # フォールバック
+        else:
+            st.info(f"🎯 的中率優先: 予測確率 {min_pred_prob:.0%} 以上の {len(filtered_df)} 頭に絞り込み")
+    else:
+        filtered_df = race_df
+
     top3_probs = {
         int(row["post_number"]): float(row["pred_prob"])
-        for _, row in race_df.iterrows()
+        for _, row in filtered_df.iterrows()
         if pd.notna(row.get("post_number")) and pd.notna(row.get("pred_prob"))
     }
 
@@ -221,14 +258,61 @@ def _display_bet_results(results: dict, budget: int):
         )
     else:
         total_stake = allocated["stake"].sum()
+
+        # ── 排他的買い目（同券種に複数点）を検出 ──
+        # 単勝・複勝は同一レース内で複数点あっても1点しか的中しない
+        # 買い目推奨は同一レース内で実行されるため race_id は不要
+        EXCLUSIVE_TYPES = {"単勝", "複勝"}
+        excl_mask = allocated["type"].isin(EXCLUSIVE_TYPES)
+        excl_df = allocated[excl_mask].copy()
+        indep_df = allocated[~excl_mask].copy()
+
+        # 排他グループ = 券種ごと（単勝同士・複勝同士は排他）
+        excl_df["_excl_group"] = excl_df["type"]
+
+        # 独立分の期待払戻（馬連・ワイドなど）
+        indep_expected = indep_df["expected_return"].sum()
+
+        # 排他分：同グループ内の最大期待払戻（最良シナリオ）・最小（最悪シナリオ）
+        excl_group_max = excl_df.groupby("_excl_group")["expected_return"].max().sum()
+        excl_group_min = excl_df.groupby("_excl_group")["expected_return"].min().sum()
+
+        # 期待値ベースの合計（数学的に正しい値）
         total_expected = allocated["expected_return"].sum()
         roi = (total_expected / total_stake - 1) * 100 if total_stake > 0 else 0
 
         col_a, col_b, col_c, col_d = st.columns(4)
         col_a.metric("購入点数", f"{len(allocated)}点")
         col_b.metric("購入金額", f"{int(total_stake):,}円", f"予算 {budget:,}円")
-        col_c.metric("期待払戻", f"{int(total_expected):,}円")
+        col_c.metric("期待払戻（期待値）", f"{int(total_expected):,}円")
         col_d.metric("期待ROI", f"{roi:+.1f}%")
+
+        # 排他的買い目がある場合はシナリオ別払戻を追加表示
+        has_exclusive = len(excl_df) > 0
+        excl_has_multiple = (excl_df.groupby("_excl_group").size() > 1).any() if has_exclusive else False
+
+        if has_exclusive and excl_has_multiple:
+            with st.expander("💡 シナリオ別払戻の見方", expanded=True):
+                st.caption(
+                    "単勝・複勝を同レースで複数点購入している場合、"
+                    "1点しか的中しないため実際の払戻はシナリオにより異なります。"
+                )
+                c1, c2, c3 = st.columns(3)
+                c1.metric(
+                    "独立分の期待払戻",
+                    f"{int(indep_expected):,}円",
+                    help="馬連・ワイドなど、互いに独立した買い目の期待払戻合計"
+                )
+                c2.metric(
+                    "排他分（最良シナリオ）",
+                    f"+{int(excl_group_max):,}円",
+                    help="単勝・複勝で、最もオッズが高い馬が的中した場合"
+                )
+                c3.metric(
+                    "排他分（最悪シナリオ）",
+                    f"+{int(excl_group_min):,}円",
+                    help="単勝・複勝で、最もオッズが低い馬が的中した場合"
+                )
 
         # 表示用整形
         disp = allocated.copy()
@@ -239,6 +323,20 @@ def _display_bet_results(results: dict, budget: int):
         disp["購入"] = disp["stake"].apply(lambda x: f"{int(x):,}円")
         disp["期待払戻"] = disp["expected_return"].apply(lambda x: f"{int(x):,}円")
 
+        # 排他的買い目に注記を付ける（券種ごとに複数点ある場合）
+        excl_type_counts = (
+            disp[disp["type"].isin(EXCLUSIVE_TYPES)]
+            .groupby("type").size()
+        )
+        multi_excl_types = set(excl_type_counts[excl_type_counts > 1].index)
+
+        def _mark_exclusive(row):
+            if row["type"] in multi_excl_types:
+                return row["期待払戻"] + " ※排他"
+            return row["期待払戻"]
+
+        disp["期待払戻"] = disp.apply(_mark_exclusive, axis=1)
+
         st.dataframe(
             disp[["type", "買い目", "AI確率", "オッズ", "期待値", "購入", "期待払戻"]].rename(
                 columns={"type": "券種"}
@@ -246,6 +344,8 @@ def _display_bet_results(results: dict, budget: int):
             use_container_width=True,
             hide_index=True,
         )
+        if has_exclusive and excl_has_multiple:
+            st.caption("※排他 = 同一レースで複数点購入している単勝・複勝。1点しか的中しません。")
 
     st.divider()
 

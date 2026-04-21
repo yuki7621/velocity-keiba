@@ -85,17 +85,23 @@ def predict_and_display(target_date: str):
     print("\n特徴量を構築中（数分かかります）...")
     df = build_all_features()
 
-    # モデル読み込み
-    try:
-        model = load_model("lightgbm_v3")
-        print("モデル lightgbm_v3 を読み込みました")
-    except FileNotFoundError:
+    # モデル読み込み（新しいバージョンから順にフォールバック）
+    model = None
+    for model_name, desc in [
+        ("lightgbm_v6", "Rankerアンサンブル + 血統特徴量"),
+        ("lightgbm_v5", "Rankerアンサンブル"),
+        ("lightgbm_v4", "v4"),
+        ("lightgbm_v3", "v3"),
+    ]:
         try:
-            model = load_model("lightgbm_v2")
-            print("モデル lightgbm_v2 を読み込みました（v3未作成）")
+            model = load_model(model_name)
+            print(f"モデル {model_name} を読み込みました（{desc}）")
+            break
         except FileNotFoundError:
-            print("エラー: 学習済みモデルが見つかりません。先にrun_train_v3.pyを実行してください。")
-            return
+            continue
+    if model is None:
+        print("エラー: 学習済みモデルが見つかりません。先にrun_train_v6.pyを実行してください。")
+        return
 
     features = get_available_features(df)
 

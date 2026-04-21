@@ -48,6 +48,14 @@ def create_tables(db_path=DB_PATH):
         )
     """)
 
+    # 調教師テーブル
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trainers (
+            trainer_id  TEXT PRIMARY KEY,
+            name        TEXT NOT NULL
+        )
+    """)
+
     # 出走結果テーブル
     cur.execute("""
         CREATE TABLE IF NOT EXISTS results (
@@ -68,10 +76,25 @@ def create_tables(db_path=DB_PATH):
             last_3f         REAL,           -- 上がり3F
             passing_order   TEXT,           -- 通過順 (例: "3-3-2-1")
             prize           REAL,           -- 賞金(万円)
+            trainer_id      TEXT,           -- 調教師ID
             FOREIGN KEY (race_id) REFERENCES races(race_id),
             FOREIGN KEY (horse_id) REFERENCES horses(horse_id),
             FOREIGN KEY (jockey_id) REFERENCES jockeys(jockey_id),
+            FOREIGN KEY (trainer_id) REFERENCES trainers(trainer_id),
             UNIQUE(race_id, horse_id)
+        )
+    """)
+
+    # 払戻テーブル（複勝払戻を馬番ごとに保存）
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS payouts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            race_id         TEXT NOT NULL,
+            bet_type        TEXT NOT NULL,      -- 'fukusho', 'tansho' 等
+            horse_number    INTEGER NOT NULL,   -- 馬番
+            payout          INTEGER NOT NULL,   -- 払戻金(円) ※100円あたり
+            FOREIGN KEY (race_id) REFERENCES races(race_id),
+            UNIQUE(race_id, bet_type, horse_number)
         )
     """)
 
@@ -80,6 +103,16 @@ def create_tables(db_path=DB_PATH):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_results_horse ON results(horse_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_results_jockey ON results(jockey_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_races_date ON races(date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_payouts_race ON payouts(race_id)")
+
+    # 既存DBへの後付けカラム追加（初回のみ実行、既存なら無視）
+    try:
+        cur.execute("ALTER TABLE results ADD COLUMN trainer_id TEXT")
+        conn.commit()
+    except Exception:
+        pass  # already exists
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_results_trainer ON results(trainer_id)")
 
     conn.commit()
     conn.close()

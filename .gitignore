@@ -26,3 +26,9 @@ exports/
 # OS
 Thumbs.db
 .DS_Store
+
+# ログ
+logs/
+
+# Claude Code ローカル設定
+.claude/settings.local.json

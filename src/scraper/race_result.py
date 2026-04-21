@@ -52,7 +52,11 @@ def _scrape_from_db(race_id: str) -> dict | None:
         return None
 
     results = _parse_results_table(soup, race_id)
-    return {"race_info": race_info, "results": results}
+
+    # 払戻情報を取得
+    payouts = _parse_payouts(soup, race_id)
+
+    return {"race_info": race_info, "results": results, "payouts": payouts}
 
 
 def _scrape_from_race_site(race_id: str) -> dict | None:
@@ -161,13 +165,16 @@ def _scrape_from_race_site(race_id: str) -> dict | None:
     # 結果テーブル
     results = _parse_result_table_race_site(soup, race_id)
 
+    # 払戻情報
+    payouts = _parse_payouts_race_site(soup, race_id)
+
     if not results:
-        return {"race_info": race_info, "results": []}
+        return {"race_info": race_info, "results": [], "payouts": payouts}
 
     if "head_count" not in race_info:
         race_info["head_count"] = len(results)
 
-    return {"race_info": race_info, "results": results}
+    return {"race_info": race_info, "results": results, "payouts": payouts}
 
 
 def _parse_result_table_race_site(soup: BeautifulSoup, race_id: str) -> list[dict]:
@@ -258,6 +265,14 @@ def _parse_result_table_race_site(soup: BeautifulSoup, race_id: str) -> list[dic
                 row["horse_weight"] = int(m.group(1))
                 row["weight_change"] = int(m.group(2))
                 continue
+
+            # 調教師 (リンクを別途探す)
+            trainer_link = td.select_one("a[href*='/trainer/']")
+            if trainer_link and "trainer_id" not in row:
+                row["trainer_name"] = trainer_link.get_text(strip=True)
+                href = trainer_link.get("href", "")
+                m2 = re.search(r"/trainer/(?:result/recent/)?(\d+)", href)
+                row["trainer_id"] = m2.group(1) if m2 else ""
 
         rows.append(row)
 
@@ -417,6 +432,18 @@ def _parse_results_table(soup: BeautifulSoup, race_id: str) -> list[dict]:
             weight_text = tds[18].get_text(strip=True)
             row.update(_parse_horse_weight(weight_text))
 
+        # 調教師 [22] (例: href="/trainer/result/recent/01126/")
+        if len(tds) > 22:
+            trainer_link = tds[22].select_one("a")
+            if trainer_link:
+                row["trainer_name"] = trainer_link.get_text(strip=True)
+                href = trainer_link.get("href", "")
+                m = re.search(r"/trainer/(?:result/recent/)?(\d+)", href)
+                row["trainer_id"] = m.group(1) if m else ""
+            else:
+                row["trainer_name"] = tds[22].get_text(strip=True)
+                row["trainer_id"] = ""
+
         rows.append(row)
 
     return rows
@@ -430,6 +457,127 @@ def _parse_horse_weight(text: str) -> dict:
         result["horse_weight"] = int(m.group(1))
         result["weight_change"] = int(m.group(2))
     return result
+
+
+def _parse_payouts(soup: BeautifulSoup, race_id: str) -> list[dict]:
+    """
+    db.netkeiba.com の払戻テーブルから複勝・単勝の払戻を取得する。
+
+    払戻テーブル構造 (.pay_table_01):
+        各行: [券種名, 馬番, 払戻金, 人気]
+        複勝は3行（1着〜3着の馬番ごとに1行）
+    """
+    payouts = []
+
+    # 払戻テーブルを探す
+    tables = soup.select(".pay_table_01")
+    if not tables:
+        return payouts
+
+    for table in tables:
+        for tr in table.select("tr"):
+            th = tr.select_one("th")
+            if th is None:
+                continue
+            bet_type_text = th.get_text(strip=True)
+
+            # 単勝 or 複勝のみ取得
+            if "単勝" in bet_type_text:
+                bet_type = "tansho"
+            elif "複勝" in bet_type_text:
+                bet_type = "fukusho"
+            else:
+                continue
+
+            tds = tr.select("td")
+            if len(tds) < 2:
+                continue
+
+            # 馬番と払戻金を取得
+            # 複勝の場合、1つのセルに複数の馬番・払戻が<br>区切りで入っていることがある
+            numbers_td = tds[0]
+            payouts_td = tds[1]
+
+            numbers_text = numbers_td.get_text(separator="\n", strip=True).split("\n")
+            payouts_text = payouts_td.get_text(separator="\n", strip=True).split("\n")
+
+            for num_str, pay_str in zip(numbers_text, payouts_text):
+                num_str = num_str.strip()
+                pay_str = pay_str.strip().replace(",", "").replace("円", "")
+
+                if not num_str.isdigit():
+                    continue
+                try:
+                    payout_val = int(pay_str)
+                except (ValueError, TypeError):
+                    continue
+
+                payouts.append({
+                    "race_id": race_id,
+                    "bet_type": bet_type,
+                    "horse_number": int(num_str),
+                    "payout": payout_val,
+                })
+
+    return payouts
+
+
+def _parse_payouts_race_site(soup: BeautifulSoup, race_id: str) -> list[dict]:
+    """
+    race.netkeiba.com の払戻テーブルから複勝・単勝の払戻を取得する。
+
+    PayTable 構造:
+        .Payout_Detail_Table 内の各行
+    """
+    payouts = []
+
+    # race.netkeiba.com の払戻テーブル
+    table = soup.select_one(".FullWrap .Result_Pay_Back table")
+    if table is None:
+        # 別のセレクタを試す
+        table = soup.select_one(".PayTableWrap table")
+    if table is None:
+        return payouts
+
+    for tr in table.select("tr"):
+        th = tr.select_one("th")
+        if th is None:
+            continue
+        bet_type_text = th.get_text(strip=True)
+
+        if "単勝" in bet_type_text:
+            bet_type = "tansho"
+        elif "複勝" in bet_type_text:
+            bet_type = "fukusho"
+        else:
+            continue
+
+        tds = tr.select("td")
+        if len(tds) < 2:
+            continue
+
+        numbers_text = tds[0].get_text(separator="\n", strip=True).split("\n")
+        payouts_text = tds[1].get_text(separator="\n", strip=True).split("\n")
+
+        for num_str, pay_str in zip(numbers_text, payouts_text):
+            num_str = num_str.strip()
+            pay_str = pay_str.strip().replace(",", "").replace("円", "")
+
+            if not num_str.isdigit():
+                continue
+            try:
+                payout_val = int(pay_str)
+            except (ValueError, TypeError):
+                continue
+
+            payouts.append({
+                "race_id": race_id,
+                "bet_type": bet_type,
+                "horse_number": int(num_str),
+                "payout": payout_val,
+            })
+
+    return payouts
 
 
 def _to_int(s: str) -> int | None:
