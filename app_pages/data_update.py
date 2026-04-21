@@ -1,14 +1,20 @@
 """データ更新ページ"""
 
+import os
+import subprocess
+import sys
 import time
 import streamlit as st
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from config.settings import DB_PATH, SCRAPE_INTERVAL_SEC
 from src.db.schema import create_tables
 from src.scraper.race_list import get_race_ids_by_month
 from src.scraper.race_result import scrape_race
 from src.scraper.storage import save_race_data
+
+MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
 
 
 def render():
@@ -24,13 +30,20 @@ def render():
 
     st.markdown("netkeibaからレースデータをスクレイピングしてDBに保存します。")
 
-    tab_date, tab_month = st.tabs(["📌 日付指定で取得（推奨）", "📅 月単位で取得"])
+    tab_date, tab_month, tab_train = st.tabs([
+        "📌 日付指定で取得（推奨）",
+        "📅 月単位で取得",
+        "🧠 モデル再学習",
+    ])
 
     with tab_date:
         _render_date_update()
 
     with tab_month:
         _render_month_update()
+
+    with tab_train:
+        _render_retrain()
 
 
 # ── 日付指定で取得 ──
@@ -180,3 +193,117 @@ def _scrape_race_ids(race_ids: list[str]):
 
     progress_bar.progress(1.0)
     st.success(f"完了！ 成功: {success}件, スキップ: {skip}件, 失敗: {fail}件")
+
+
+# ── モデル再学習 ──
+
+def _render_retrain():
+    """モデルを再学習するためのUI"""
+
+    st.markdown(
+        "蓄積されたレースデータでモデルを**再学習**します。\n\n"
+        "- データ更新だけで反映されるもの: 馬・騎手・調教師の直近成績、馬場傾向、オッズ\n"
+        "- **再学習で反映されるもの**: 特徴量の重み、血統統計の基準値、決定木ルール\n\n"
+        "推奨頻度は **月1回** です。処理には PCスペックにより **10〜30分** ほどかかります。"
+    )
+
+    # 最後の学習日時を表示
+    model_files = {
+        "lightgbm_v6": MODEL_DIR / "lightgbm_v6.pkl",
+        "lightgbm_v5": MODEL_DIR / "lightgbm_v5.pkl",
+    }
+    st.markdown("#### 現在のモデル")
+    cols = st.columns(len(model_files))
+    for col, (name, path) in zip(cols, model_files.items()):
+        with col:
+            if path.exists():
+                mtime = datetime.fromtimestamp(path.stat().st_mtime)
+                days_ago = (datetime.now() - mtime).days
+                badge = "🟢" if days_ago <= 35 else "🟡" if days_ago <= 60 else "🔴"
+                st.metric(
+                    label=f"{badge} {name}",
+                    value=f"{days_ago}日前",
+                    delta=mtime.strftime("%Y-%m-%d %H:%M"),
+                    delta_color="off",
+                )
+            else:
+                st.metric(label=f"⚪ {name}", value="未学習")
+
+    st.divider()
+
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        model_choice = st.selectbox(
+            "学習するモデル",
+            ["lightgbm_v6 (推奨)", "lightgbm_v5"],
+            help="v6 は血統特徴量を含みます。通常は v6 を使用してください。",
+        )
+    with col2:
+        st.markdown("")
+        st.markdown("")
+        run_btn = st.button("🧠 再学習を実行", type="primary", key="btn_retrain")
+
+    if run_btn:
+        script = "run_train_v6.py" if "v6" in model_choice else "run_train_v5.py"
+        _run_training(script)
+
+
+def _run_training(script_name: str):
+    """学習スクリプトをサブプロセスで実行し、出力をリアルタイム表示"""
+    project_root = Path(__file__).resolve().parent.parent
+    script_path = project_root / script_name
+
+    if not script_path.exists():
+        st.error(f"❌ {script_name} が見つかりません: {script_path}")
+        return
+
+    st.warning("⚠️ 学習中はブラウザのタブを閉じないでください。途中キャンセルすると中途半端な状態になることがあります。")
+
+    status = st.empty()
+    log_area = st.empty()
+    status.info(f"🧠 {script_name} を実行中... (10〜30分ほどかかります)")
+
+    start_ts = time.time()
+    logs: list[str] = []
+
+    try:
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        process = subprocess.Popen(
+            [sys.executable, str(script_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(project_root),
+            env=env,
+            bufsize=1,
+        )
+
+        assert process.stdout is not None
+        for line in process.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            logs.append(line)
+            elapsed = int(time.time() - start_ts)
+            status.info(f"🧠 学習中... ({elapsed // 60}分{elapsed % 60}秒経過)")
+            # 末尾30行を表示
+            log_area.code("\n".join(logs[-30:]), language="text")
+
+        process.wait()
+        elapsed = int(time.time() - start_ts)
+
+        if process.returncode == 0:
+            status.success(f"✅ 学習完了！ ({elapsed // 60}分{elapsed % 60}秒)")
+            st.balloons()
+            st.info("📊 「🔬 モデル診断」ページで新モデルの性能を確認してください。")
+        else:
+            status.error(f"❌ 学習が失敗しました (exit code: {process.returncode})")
+
+    except Exception as e:
+        status.error(f"❌ 実行エラー: {e}")
+        log_area.code("\n".join(logs[-30:]), language="text")
