@@ -63,7 +63,7 @@ def _render_weekly_check():
     with col1:
         model_name = st.selectbox(
             "モデル",
-            ["lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
+            ["lightgbm_v7", "lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
             key="weekly_model",
         )
     with col2:
@@ -309,7 +309,7 @@ def _render_full_diagnosis():
     with col1:
         model_name = st.selectbox(
             "分析するモデル",
-            ["lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
+            ["lightgbm_v7", "lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
             key="diag_model",
         )
     with col2:

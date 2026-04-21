@@ -70,7 +70,7 @@ def _render_pre_race_prediction():
 
     with col2:
         model_name = st.selectbox(
-            "モデル", ["lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="prerace_model"
+            "モデル", ["lightgbm_v7", "lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="prerace_model"
         )
 
     with col3:
@@ -548,7 +548,7 @@ def _render_db_prediction():
 
     with col3:
         model_name = st.selectbox(
-            "モデル", ["lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="db_model"
+            "モデル", ["lightgbm_v7", "lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="db_model"
         )
 
     conn.close()

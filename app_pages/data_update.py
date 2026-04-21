@@ -209,6 +209,7 @@ def _render_retrain():
 
     # 最後の学習日時を表示
     model_files = {
+        "lightgbm_v7": MODEL_DIR / "lightgbm_v7.pkl",
         "lightgbm_v6": MODEL_DIR / "lightgbm_v6.pkl",
         "lightgbm_v5": MODEL_DIR / "lightgbm_v5.pkl",
     }
@@ -235,8 +236,8 @@ def _render_retrain():
     with col1:
         model_choice = st.selectbox(
             "学習するモデル",
-            ["lightgbm_v6 (推奨)", "lightgbm_v5"],
-            help="v6 は血統特徴量を含みます。通常は v6 を使用してください。",
+            ["lightgbm_v7 (推奨)", "lightgbm_v6", "lightgbm_v5"],
+            help="v7 は血統+脚質+休養パターン特徴量を含みます。通常は v7 を使用してください。",
         )
     with col2:
         st.markdown("")
@@ -244,7 +245,12 @@ def _render_retrain():
         run_btn = st.button("🧠 再学習を実行", type="primary", key="btn_retrain")
 
     if run_btn:
-        script = "run_train_v6.py" if "v6" in model_choice else "run_train_v5.py"
+        if "v7" in model_choice:
+            script = "run_train_v7.py"
+        elif "v6" in model_choice:
+            script = "run_train_v6.py"
+        else:
+            script = "run_train_v5.py"
         _run_training(script)
 
 

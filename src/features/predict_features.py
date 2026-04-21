@@ -84,9 +84,83 @@ def _compute_speed_index(finish_time_sec: float, surface: str, distance: int,
 
 def clear_speed_reference_cache():
     """キャッシュをクリアする（テスト用）"""
-    global _speed_ref_cache, _pedigree_stats_cache
+    global _speed_ref_cache, _pedigree_stats_cache, _course_style_cache
     _speed_ref_cache = None
     _pedigree_stats_cache = None
+    _course_style_cache = None
+
+
+# ============================================================
+# コース×脚質のtop3率キャッシュ (v7)
+# ============================================================
+_course_style_cache: dict | None = None
+
+
+def _dist_cat_label(distance: int) -> str:
+    if distance <= 1400:
+        return "short"
+    if distance <= 1800:
+        return "mile"
+    if distance <= 2200:
+        return "middle"
+    return "long"
+
+
+def _load_course_style_stats(conn) -> dict:
+    """コース × 距離カテゴリ × 脚質 → top3 率 を集計してキャッシュ"""
+    global _course_style_cache
+    if _course_style_cache is not None:
+        return _course_style_cache
+
+    query = """
+        SELECT rc.venue, rc.surface, rc.distance,
+               r.finish_position, r.passing_order, rc.head_count
+        FROM results r
+        JOIN races rc ON r.race_id = rc.race_id
+        WHERE r.finish_position > 0
+          AND (rc.distance % 100 = 0 OR rc.distance = 1150)
+          AND rc.title NOT LIKE '%障害%'
+          AND rc.title NOT LIKE '%ジャンプ%'
+          AND NOT (rc.distance >= 3000 AND (
+                rc.title LIKE '%J' OR rc.title LIKE '%JS' OR rc.title LIKE '%GJ'
+          ))
+          AND rc.surface != '障害'
+          AND r.passing_order IS NOT NULL
+          AND rc.head_count > 0
+    """
+    df = pd.read_sql_query(query, conn)
+    if len(df) == 0:
+        _course_style_cache = {}
+        return _course_style_cache
+
+    # 脚質分類
+    def first_pos(s):
+        try:
+            return int(str(s).split("-")[0])
+        except Exception:
+            return None
+
+    df["pass_1"] = df["passing_order"].apply(first_pos)
+    df = df[df["pass_1"].notna()]
+    df["ratio"] = df["pass_1"] / df["head_count"]
+
+    def classify(r):
+        if r <= 0.15: return 1
+        if r <= 0.40: return 2
+        if r <= 0.70: return 3
+        return 4
+    df["style"] = df["ratio"].apply(classify)
+
+    df["dist_cat"] = df["distance"].apply(_dist_cat_label)
+    df["is_top3"] = (df["finish_position"] <= 3).astype(float)
+
+    cache = {}
+    for (venue, surf, dc, style), grp in df.groupby(["venue", "surface", "dist_cat", "style"]):
+        if len(grp) >= 20:
+            cache[(venue, surf, dc, int(style))] = float(grp["is_top3"].mean())
+
+    _course_style_cache = cache
+    return cache
 
 
 # ============================================================
@@ -284,6 +358,19 @@ def build_prediction_features(
 
         rows.append(row)
 
+    # v7: コース × 主脚質 の適性を各馬に付与
+    course_style_stats = _load_course_style_stats(conn)
+    venue = race_info.get("venue", "")
+    surf = race_info.get("surface", "")
+    dist_cat = _dist_cat_label(race_info.get("distance", 0) or 0)
+    for r in rows:
+        main = r.get("horse_main_style")
+        if pd.notna(main) and main is not None:
+            key = (venue, surf, dist_cat, int(main))
+            r["main_style_course_fit"] = course_style_stats.get(key, np.nan)
+        else:
+            r["main_style_course_fit"] = np.nan
+
     conn.close()
 
     df = pd.DataFrame(rows)
@@ -364,7 +451,8 @@ def _get_horse_features(conn, horse_id: str, race_info: dict, n_races: int = 5) 
     query = f"""
         SELECT r.finish_position, r.finish_time_sec, r.last_3f,
                r.passing_order, r.prize, r.odds,
-               rc.date, rc.distance, rc.surface, rc.venue, rc.condition
+               rc.date, rc.distance, rc.surface, rc.venue, rc.condition,
+               rc.head_count
         FROM results r
         JOIN races rc ON r.race_id = rc.race_id
         WHERE r.horse_id = ?
@@ -466,6 +554,8 @@ def _get_horse_features(conn, horse_id: str, race_info: dict, n_races: int = 5) 
     # ペース・脚質
     first_pass_list = []
     pos_change_list = []
+    style_counts = {1: 0, 2: 0, 3: 0, 4: 0}
+    style_total = 0
     for _, r in past.head(n_races).iterrows():
         po = r["passing_order"]
         if pd.notna(po) and po:
@@ -474,11 +564,40 @@ def _get_horse_features(conn, horse_id: str, race_info: dict, n_races: int = 5) 
                 fp = int(parts[0])
                 first_pass_list.append(fp)
                 pos_change_list.append(fp - r["finish_position"])
+                # v7: 脚質カテゴリ
+                hc = r.get("head_count") if "head_count" in r.index else None
+                if hc and hc > 0:
+                    ratio = fp / hc
+                    if ratio <= 0.15:
+                        code = 1
+                    elif ratio <= 0.40:
+                        code = 2
+                    elif ratio <= 0.70:
+                        code = 3
+                    else:
+                        code = 4
+                    style_counts[code] += 1
+                    style_total += 1
             except (ValueError, IndexError):
                 pass
 
     features["horse_avg_early_pos"] = np.mean(first_pass_list) if first_pass_list else np.nan
     features["horse_avg_pos_change"] = np.mean(pos_change_list) if pos_change_list else np.nan
+
+    # v7: 脚質頻度
+    if style_total > 0:
+        features["horse_style_nige_rate"] = style_counts[1] / style_total
+        features["horse_style_senko_rate"] = style_counts[2] / style_total
+        features["horse_style_sashi_rate"] = style_counts[3] / style_total
+        features["horse_style_oikomi_rate"] = style_counts[4] / style_total
+        main_code = max(style_counts, key=style_counts.get)
+        features["horse_main_style"] = float(main_code)
+    else:
+        features["horse_style_nige_rate"] = np.nan
+        features["horse_style_senko_rate"] = np.nan
+        features["horse_style_sashi_rate"] = np.nan
+        features["horse_style_oikomi_rate"] = np.nan
+        features["horse_main_style"] = np.nan
 
     return features
 
@@ -621,6 +740,15 @@ def _add_basic_features(df: pd.DataFrame) -> pd.DataFrame:
     # 休み明けフラグ
     df["is_fresh"] = (df["days_since_last"] >= 70).astype(float)
 
+    # v7: 休養パターン詳細
+    df["is_consecutive"] = (df["days_since_last"].fillna(999) <= 7).astype(float)
+    df["is_short_break"] = (
+        (df["days_since_last"].fillna(999) > 7) &
+        (df["days_since_last"].fillna(999) <= 21)
+    ).astype(float)
+    df["is_long_break"] = (df["days_since_last"].fillna(0) >= 180).astype(float)
+    df["rest_days_log"] = np.log1p(df["days_since_last"].fillna(0).clip(lower=0))
+
     return df
 
 
@@ -750,6 +878,12 @@ def _empty_horse_features(n_races: int = 5) -> dict:
         "horse_venue_top3_rate": np.nan,
         "horse_avg_early_pos": np.nan,
         "horse_avg_pos_change": np.nan,
+        # v7 脚質
+        "horse_style_nige_rate": np.nan,
+        "horse_style_senko_rate": np.nan,
+        "horse_style_sashi_rate": np.nan,
+        "horse_style_oikomi_rate": np.nan,
+        "horse_main_style": np.nan,
     }
 
 

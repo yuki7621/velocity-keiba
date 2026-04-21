@@ -51,6 +51,11 @@ def load_results(db_path=DB_PATH) -> pd.DataFrame:
     conn.close()
     df["date"] = pd.to_datetime(df["date"])
 
+    # head_count は races テーブルに保存されていない期間があるので
+    # results の行数から動的に計算する（全レースに適用）
+    _hc = df.groupby("race_id")["horse_id"].transform("count")
+    df["head_count"] = df["head_count"].fillna(_hc).astype(float)
+
     # 実複勝オッズ（100円あたりの払戻 → 倍率に変換）
     # 3着以内で払戻データがある場合: payout / 100
     # 3着以内で払戻データがない場合: 概算 odds * 0.3
@@ -267,6 +272,120 @@ def add_pace_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
+#  6b. 脚質分類 & 脚質適性 (v7)
+# ============================================================
+
+# 脚質カテゴリ: 1=逃げ, 2=先行, 3=差し, 4=追込
+_RUNNING_STYLES = [1, 2, 3, 4]
+_STYLE_NAMES = ["nige", "senko", "sashi", "oikomi"]
+
+
+def _classify_style(pos_ratio: float) -> float:
+    """pass_1 / head_count から脚質カテゴリを返す"""
+    if pd.isna(pos_ratio):
+        return np.nan
+    if pos_ratio <= 0.15:
+        return 1  # 逃げ (先頭付近)
+    if pos_ratio <= 0.40:
+        return 2  # 先行
+    if pos_ratio <= 0.70:
+        return 3  # 差し
+    return 4      # 追込
+
+
+def add_running_style_features(df: pd.DataFrame) -> pd.DataFrame:
+    """脚質カテゴリと、馬の脚質パターン・コース別脚質適性を作成する"""
+    df = df.sort_values(["date", "race_id"]).reset_index(drop=True)
+
+    # --- 1) このレースで発現した脚質 (過去学習/参考用、予測時は未知) ---
+    pos_ratio = np.where(
+        df["head_count"].fillna(0) > 0,
+        df["early_position"].astype(float) / df["head_count"].astype(float),
+        np.nan,
+    )
+    df["pos_ratio"] = pos_ratio
+    df["running_style"] = pd.Series(pos_ratio, index=df.index).apply(_classify_style)
+
+    # --- 2) 馬ごとの「過去の脚質頻度」= 予測時にも使える ---
+    # 各脚質の one-hot × shift(1) × expanding mean = 頻度
+    for code, name in zip(_RUNNING_STYLES, _STYLE_NAMES):
+        flag_col = f"_is_style_{name}"
+        df[flag_col] = (df["running_style"] == code).astype(float)
+        df[f"horse_style_{name}_rate"] = _grouped_shift_expanding(df, "horse_id", flag_col)
+
+    # --- 3) 馬の主脚質 (最頻値となる脚質) ---
+    style_cols = [f"horse_style_{n}_rate" for n in _STYLE_NAMES]
+    with np.errstate(invalid="ignore"):
+        arr = df[style_cols].to_numpy()
+        any_valid = (~np.isnan(arr)).any(axis=1)
+        # NaN を -inf に置換して argmax
+        arr_filled = np.where(np.isnan(arr), -np.inf, arr)
+        main_idx = arr_filled.argmax(axis=1)
+        df["horse_main_style"] = np.where(any_valid, main_idx + 1, np.nan).astype(float)
+
+    # --- 4) コース × 距離カテゴリ × 脚質 の成績 ---
+    # 予測時には「このコースで自馬の主脚質は馬券内率がいくつか」を知りたい
+    df["_dist_cat"] = pd.cut(
+        df["distance"].fillna(0),
+        bins=[0, 1400, 1800, 2200, 9999],
+        labels=["short", "mile", "middle", "long"],
+    ).astype(object)
+
+    # 集計用: コース×距離カテゴリ×脚質 → 過去の top3率 (shift+expanding)
+    df["_is_top3_style"] = (df["finish_position"] <= 3).astype(float)
+    composite = (
+        df["venue"].astype(str) + "_"
+        + df["surface"].astype(str) + "_"
+        + df["_dist_cat"].astype(str) + "_"
+        + df["running_style"].astype(str)
+    )
+    shifted = df["_is_top3_style"].groupby(composite).shift(1)
+    df["course_style_top3_rate"] = (
+        shifted.groupby(composite).expanding(min_periods=20).mean()
+        .droplevel(0).reindex(df.index)
+    )
+
+    # --- 5) その馬の主脚質 × このコース の過去成績 ---
+    # → 馬の主脚質 (horse_main_style) から course_style_top3_rate の対応値を引く
+    #   (そのためにコース×各脚質の直近率を全部先に作る)
+    course_style_rates = {}
+    for code in _RUNNING_STYLES:
+        comp = (
+            df["venue"].astype(str) + "_"
+            + df["surface"].astype(str) + "_"
+            + df["_dist_cat"].astype(str) + "_"
+            + str(code)
+        )
+        # 過去の同コース×この脚質の top3 率（この行を含まない）
+        shifted_c = df["_is_top3_style"].groupby(comp).shift(1)
+        course_style_rates[code] = (
+            shifted_c.groupby(comp).expanding(min_periods=20).mean()
+            .droplevel(0).reindex(df.index)
+        )
+
+    def _main_style_fit(row_idx, main):
+        if pd.isna(main):
+            return np.nan
+        rates = course_style_rates[int(main)]
+        return rates.iloc[row_idx]
+
+    # ベクトル化: 馬の主脚質インデックスに対応する率を抜き出す
+    out = np.full(len(df), np.nan)
+    main_arr = df["horse_main_style"].to_numpy()
+    for code in _RUNNING_STYLES:
+        mask = main_arr == code
+        if mask.any():
+            out[mask] = course_style_rates[code].to_numpy()[mask]
+    df["main_style_course_fit"] = out
+
+    # --- 6) 後片付け ---
+    drop_cols = [f"_is_style_{n}" for n in _STYLE_NAMES] + ["_is_top3_style", "_dist_cat"]
+    df.drop(columns=drop_cols, inplace=True, errors="ignore")
+
+    return df
+
+
+# ============================================================
 #  7. 騎手の特徴量（ベクトル化版）
 # ============================================================
 
@@ -473,6 +592,15 @@ def add_rest_pattern(df: pd.DataFrame) -> pd.DataFrame:
 
     df["is_fresh"] = (df["days_since_last"] >= 70).astype(float)
 
+    # v7: より細かい休養系フラグ
+    df["is_consecutive"] = (df["days_since_last"] <= 7).astype(float)        # 連闘
+    df["is_short_break"] = (
+        (df["days_since_last"] > 7) & (df["days_since_last"] <= 21)
+    ).astype(float)                                                            # 中1〜2週
+    df["is_long_break"] = (df["days_since_last"] >= 180).astype(float)       # 半年以上
+    # 休養日数の対数 (極端値を圧縮)
+    df["rest_days_log"] = np.log1p(df["days_since_last"].clip(lower=0))
+
     return df
 
 
@@ -535,27 +663,30 @@ def build_all_features(db_path=DB_PATH) -> pd.DataFrame:
     _step("[5/9] 競馬場適性を計算中...")
     df = add_venue_aptitude(df)
 
-    _step("[6/9] ペース特徴量を作成中...")
+    _step("[6/13] ペース特徴量を作成中...")
     df = add_pace_features(df)
 
-    _step("[7/11] 騎手の特徴量を作成中...")
+    _step("[7/13] 脚質・コース×脚質適性を計算中 (v7)...")
+    df = add_running_style_features(df)
+
+    _step("[8/13] 騎手の特徴量を作成中...")
     df = add_jockey_features(df)
 
-    _step("[8/11] 調教師の特徴量を作成中...")
+    _step("[9/13] 調教師の特徴量を作成中...")
     df = add_trainer_features(df)
 
-    _step("[9/11] 基本特徴量・レースレベル特徴量を追加中...")
+    _step("[10/13] 基本特徴量・レースレベル特徴量を追加中...")
     df = add_basic_features(df)
     df = add_rest_pattern(df)
     df = add_race_level_features(df)
 
-    _step("[10/12] 馬場傾向（前日バイアス）を計算中...")
+    _step("[11/13] 馬場傾向（前日バイアス）を計算中...")
     df = add_track_bias_features(df, db_path)
 
-    _step("[11/12] 血統特徴量を計算中...")
+    _step("[12/13] 血統特徴量を計算中...")
     df = add_pedigree_features(df)
 
-    _step("[12/12] 交互作用特徴量を追加中...")
+    _step("[13/13] 交互作用特徴量を追加中...")
     df = add_interaction_features(df)
 
     total = time.time() - t0

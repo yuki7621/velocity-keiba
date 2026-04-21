@@ -50,11 +50,16 @@ def save_race_data(data: dict, db_path=DB_PATH):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
+    # head_count: race_info に無ければ results 行数で補完
+    head_count = race.get("head_count")
+    if head_count is None and data.get("results"):
+        head_count = len(data["results"])
+
     # レース情報を保存
     cur.execute("""
         INSERT OR REPLACE INTO races
-        (race_id, date, venue, title, surface, distance, weather, condition)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (race_id, date, venue, title, surface, distance, weather, condition, head_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         race.get("race_id"),
         race.get("date"),
@@ -64,6 +69,7 @@ def save_race_data(data: dict, db_path=DB_PATH):
         race.get("distance"),
         race.get("weather"),
         race.get("condition"),
+        head_count,
     ))
 
     # 出走結果を保存

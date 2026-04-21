@@ -105,6 +105,18 @@ FEATURE_COLUMNS = [
     "sire_distcat_top3",          # 種牡馬の短中距離/中長距離別複勝率
     "dam_sire_top3_rate",         # 母父の通算複勝率
     "dam_sire_surface_top3",      # 母父の芝/ダ別複勝率
+
+    # --- v7: 脚質 & 休養パターン ---
+    "horse_style_nige_rate",      # 過去の逃げ率
+    "horse_style_senko_rate",     # 過去の先行率
+    "horse_style_sashi_rate",     # 過去の差し率
+    "horse_style_oikomi_rate",    # 過去の追込率
+    "horse_main_style",           # 主脚質 (1逃/2先/3差/4追) — カテゴリだがLGBMは数値OK
+    "main_style_course_fit",      # 自馬の主脚質 × このコースの過去複勝率
+    "is_consecutive",             # 連闘 (7日以内)
+    "is_short_break",             # 中1〜2週
+    "is_long_break",              # 半年以上の休み明け
+    "rest_days_log",              # 休養日数の対数
 ]
 
 # 目的変数: 3着以内かどうか

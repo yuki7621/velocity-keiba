@@ -88,6 +88,7 @@ def predict_and_display(target_date: str):
     # モデル読み込み（新しいバージョンから順にフォールバック）
     model = None
     for model_name, desc in [
+        ("lightgbm_v7", "Rankerアンサンブル + 血統 + 脚質/休養"),
         ("lightgbm_v6", "Rankerアンサンブル + 血統特徴量"),
         ("lightgbm_v5", "Rankerアンサンブル"),
         ("lightgbm_v4", "v4"),

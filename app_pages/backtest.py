@@ -25,7 +25,7 @@ def render():
     # ── 設定 ──
     col1, col2 = st.columns(2)
     with col1:
-        model_name = st.selectbox("モデル", ["lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"])
+        model_name = st.selectbox("モデル", ["lightgbm_v7", "lightgbm_v6", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"])
         strategy = st.selectbox("戦略", ["バリューベット（エッジ）", "期待値（EV）"])
 
     with col2:
