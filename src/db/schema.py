@@ -85,13 +85,14 @@ def create_tables(db_path=DB_PATH):
         )
     """)
 
-    # 払戻テーブル（複勝払戻を馬番ごとに保存）
+    # 払戻テーブル（全券種対応: 単勝/複勝/枠連/馬連/ワイド/馬単/三連複/三連単）
     cur.execute("""
         CREATE TABLE IF NOT EXISTS payouts (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             race_id         TEXT NOT NULL,
-            bet_type        TEXT NOT NULL,      -- 'fukusho', 'tansho' 等
-            horse_number    INTEGER NOT NULL,   -- 馬番
+            bet_type        TEXT NOT NULL,      -- 'tansho' | 'fukusho' | 'wakuren' | 'umaren' | 'wide' | 'umatan' | 'sanrenpuku' | 'sanrentan'
+            horse_number    INTEGER,            -- 単勝/複勝の馬番（multi-horseではNULL）
+            horse_numbers   TEXT,               -- 組合せ文字列 "5" or "3-5-7"（順序あり馬単/三連単も同形式）
             payout          INTEGER NOT NULL,   -- 払戻金(円) ※100円あたり
             FOREIGN KEY (race_id) REFERENCES races(race_id),
             UNIQUE(race_id, bet_type, horse_number)
@@ -113,6 +114,50 @@ def create_tables(db_path=DB_PATH):
         pass  # already exists
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_results_trainer ON results(trainer_id)")
+
+    # ─ payouts テーブル マイグレーション ─
+    # 旧: UNIQUE(race_id, bet_type, horse_number) / horse_number NOT NULL
+    # 新: UNIQUE(race_id, bet_type, horse_numbers) / horse_number nullable / horse_numbers追加
+    cur.execute("PRAGMA table_info(payouts)")
+    cols = {row[1]: row for row in cur.fetchall()}
+    needs_migrate = ("horse_numbers" not in cols) or (
+        "horse_number" in cols and cols["horse_number"][3] == 1  # NOT NULL
+    )
+    if needs_migrate:
+        print("  payouts テーブルをマイグレーション中...")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS payouts_new (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                race_id         TEXT NOT NULL,
+                bet_type        TEXT NOT NULL,
+                horse_number    INTEGER,
+                horse_numbers   TEXT,
+                payout          INTEGER NOT NULL,
+                UNIQUE(race_id, bet_type, horse_numbers)
+            )
+        """)
+        if "horse_numbers" in cols:
+            cur.execute("""
+                INSERT OR IGNORE INTO payouts_new (race_id, bet_type, horse_number, horse_numbers, payout)
+                SELECT race_id, bet_type, horse_number,
+                       COALESCE(horse_numbers, CAST(horse_number AS TEXT)),
+                       payout
+                FROM payouts
+            """)
+        else:
+            cur.execute("""
+                INSERT OR IGNORE INTO payouts_new (race_id, bet_type, horse_number, horse_numbers, payout)
+                SELECT race_id, bet_type, horse_number,
+                       CAST(horse_number AS TEXT),
+                       payout
+                FROM payouts
+            """)
+        cur.execute("DROP TABLE payouts")
+        cur.execute("ALTER TABLE payouts_new RENAME TO payouts")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_payouts_race ON payouts(race_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_payouts_bet_type ON payouts(race_id, bet_type)")
+        conn.commit()
+        print("  payouts マイグレーション完了")
 
     conn.commit()
     conn.close()

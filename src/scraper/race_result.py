@@ -6,6 +6,43 @@ from bs4 import BeautifulSoup
 from config.settings import NETKEIBA_BASE_URL, USER_AGENT
 
 
+# 払戻テーブルの券種ラベル → 内部名
+BET_TYPE_MAP = {
+    "単勝": "tansho",
+    "複勝": "fukusho",
+    "枠連": "wakuren",
+    "馬連": "umaren",
+    "ワイド": "wide",
+    "馬単": "umatan",
+    "三連複": "sanrenpuku",
+    "3連複": "sanrenpuku",
+    "三連単": "sanrentan",
+    "3連単": "sanrentan",
+}
+
+# 単勝・複勝は1頭券種、それ以外は組合せ券種
+_SINGLE_HORSE_TYPES = {"tansho", "fukusho"}
+
+
+def _normalize_combo(s: str) -> str:
+    """'3 - 5 - 7' や '3→5→7' や '3 → 5' を '3-5-7' 形式に正規化"""
+    s = s.strip()
+    # 区切り文字（→ - — ― – ・ 空白）を - に統一
+    s = re.sub(r"[→\-—―–・\s]+", "-", s)
+    s = s.strip("-")
+    parts = [p for p in s.split("-") if p.isdigit()]
+    return "-".join(parts)
+
+
+def _detect_bet_type(text: str) -> str | None:
+    """払戻テーブルの th テキストから内部券種名を返す"""
+    t = text.strip()
+    for label, name in BET_TYPE_MAP.items():
+        if label in t:
+            return name
+    return None
+
+
 def scrape_race(race_id: str) -> dict | None:
     """
     レースIDから結果を取得する。
@@ -479,43 +516,39 @@ def _parse_payouts(soup: BeautifulSoup, race_id: str) -> list[dict]:
             th = tr.select_one("th")
             if th is None:
                 continue
-            bet_type_text = th.get_text(strip=True)
-
-            # 単勝 or 複勝のみ取得
-            if "単勝" in bet_type_text:
-                bet_type = "tansho"
-            elif "複勝" in bet_type_text:
-                bet_type = "fukusho"
-            else:
+            bet_type = _detect_bet_type(th.get_text(strip=True))
+            if bet_type is None:
                 continue
 
             tds = tr.select("td")
             if len(tds) < 2:
                 continue
 
-            # 馬番と払戻金を取得
-            # 複勝の場合、1つのセルに複数の馬番・払戻が<br>区切りで入っていることがある
-            numbers_td = tds[0]
-            payouts_td = tds[1]
-
-            numbers_text = numbers_td.get_text(separator="\n", strip=True).split("\n")
-            payouts_text = payouts_td.get_text(separator="\n", strip=True).split("\n")
+            numbers_text = tds[0].get_text(separator="\n", strip=True).split("\n")
+            payouts_text = tds[1].get_text(separator="\n", strip=True).split("\n")
 
             for num_str, pay_str in zip(numbers_text, payouts_text):
-                num_str = num_str.strip()
-                pay_str = pay_str.strip().replace(",", "").replace("円", "")
-
-                if not num_str.isdigit():
+                combo = _normalize_combo(num_str)
+                if not combo:
                     continue
+                pay_str_clean = pay_str.strip().replace(",", "").replace("円", "")
                 try:
-                    payout_val = int(pay_str)
+                    payout_val = int(pay_str_clean)
                 except (ValueError, TypeError):
                     continue
+
+                # 単勝/複勝は horse_number を整数で保存、それ以外は None
+                first_horse = int(combo.split("-")[0]) if "-" not in combo else None
+                if bet_type in _SINGLE_HORSE_TYPES:
+                    horse_number = int(combo.split("-")[0]) if combo.isdigit() else None
+                else:
+                    horse_number = None
 
                 payouts.append({
                     "race_id": race_id,
                     "bet_type": bet_type,
-                    "horse_number": int(num_str),
+                    "horse_number": horse_number,
+                    "horse_numbers": combo,
                     "payout": payout_val,
                 })
 
@@ -543,13 +576,8 @@ def _parse_payouts_race_site(soup: BeautifulSoup, race_id: str) -> list[dict]:
         th = tr.select_one("th")
         if th is None:
             continue
-        bet_type_text = th.get_text(strip=True)
-
-        if "単勝" in bet_type_text:
-            bet_type = "tansho"
-        elif "複勝" in bet_type_text:
-            bet_type = "fukusho"
-        else:
+        bet_type = _detect_bet_type(th.get_text(strip=True))
+        if bet_type is None:
             continue
 
         tds = tr.select("td")
@@ -560,20 +588,25 @@ def _parse_payouts_race_site(soup: BeautifulSoup, race_id: str) -> list[dict]:
         payouts_text = tds[1].get_text(separator="\n", strip=True).split("\n")
 
         for num_str, pay_str in zip(numbers_text, payouts_text):
-            num_str = num_str.strip()
-            pay_str = pay_str.strip().replace(",", "").replace("円", "")
-
-            if not num_str.isdigit():
+            combo = _normalize_combo(num_str)
+            if not combo:
                 continue
+            pay_str_clean = pay_str.strip().replace(",", "").replace("円", "")
             try:
-                payout_val = int(pay_str)
+                payout_val = int(pay_str_clean)
             except (ValueError, TypeError):
                 continue
+
+            if bet_type in _SINGLE_HORSE_TYPES:
+                horse_number = int(combo.split("-")[0]) if combo.isdigit() else None
+            else:
+                horse_number = None
 
             payouts.append({
                 "race_id": race_id,
                 "bet_type": bet_type,
-                "horse_number": int(num_str),
+                "horse_number": horse_number,
+                "horse_numbers": combo,
                 "payout": payout_val,
             })
 

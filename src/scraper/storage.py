@@ -115,16 +115,20 @@ def save_race_data(data: dict, db_path=DB_PATH):
             row.get("passing_order"),
         ))
 
-    # 払戻情報を保存
+    # 払戻情報を保存（全券種対応）
     for payout in data.get("payouts", []):
+        hns = payout.get("horse_numbers")
+        if hns is None and payout.get("horse_number") is not None:
+            hns = str(payout["horse_number"])
         cur.execute("""
             INSERT OR REPLACE INTO payouts
-            (race_id, bet_type, horse_number, payout)
-            VALUES (?, ?, ?, ?)
+            (race_id, bet_type, horse_number, horse_numbers, payout)
+            VALUES (?, ?, ?, ?, ?)
         """, (
             payout.get("race_id"),
             payout.get("bet_type"),
             payout.get("horse_number"),
+            hns,
             payout.get("payout"),
         ))
 
