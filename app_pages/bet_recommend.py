@@ -5,6 +5,14 @@ import pandas as pd
 
 from src.scraper.odds import fetch_all_odds
 from src.betting.recommend import compute_all_bets, allocate_budget
+from src.betting.sanrenpuku_filter import (
+    evaluate_all_races as evaluate_sanrenpuku_all,
+    STRATEGY_NAME as SANRENPUKU_STRATEGY,
+    EXPECTED_ROI as SANRENPUKU_ROI,
+    EXPECTED_HIT_RATE as SANRENPUKU_HIT,
+    MIN_HEAD_COUNT,
+    MIN_TOP3_PROB,
+)
 
 
 def render():
@@ -24,6 +32,87 @@ def render():
         return
 
     df: pd.DataFrame = st.session_state["prerace_results"]
+
+    # ── モード選択 ──
+    tab_ev, tab_sanren = st.tabs([
+        "💎 期待値ベース（EV/ケリー基準）",
+        "🎯 3連複BOX 推奨レース一覧",
+    ])
+
+    with tab_sanren:
+        _render_sanrenpuku_summary(df)
+
+    with tab_ev:
+        _render_ev_mode(df)
+
+
+def _render_sanrenpuku_summary(df: pd.DataFrame):
+    """3連複BOX推奨レースを一覧表示（バックテストで発見した条件合致レースのみ）"""
+    st.markdown(
+        f"**{SANRENPUKU_STRATEGY}** — バックテストで見つかった安定戦略。  \n"
+        f"条件: 出走頭数 ≥ {MIN_HEAD_COUNT} / 3位AI確率 ≥ {MIN_TOP3_PROB:.0%} / 1番人気 ∈ AI Top3  \n"
+        f"実績 ROI: **{SANRENPUKU_ROI:.1f}%** / 的中率 **{SANRENPUKU_HIT:.1f}%** "
+        f"(2025-04〜2026-04, 1889レース / 前半102.2% 後半103.9%)"
+    )
+
+    st.info(
+        "💡 1レース1点・100円で BOX購入 → 月間150レース×100円=約15,000円投資、期待月収+360円  \n"
+        "ただし **月次の振れ幅は30%〜224% と激しい**。余剰資金で運用してください。"
+    )
+
+    recs = evaluate_sanrenpuku_all(df)
+    recommended = [r for r in recs if r.is_recommended]
+
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("総レース数", f"{len(recs)}R")
+    col_b.metric("推奨レース", f"{len(recommended)}R")
+    col_c.metric("カバレッジ", f"{len(recommended)/len(recs)*100:.1f}%" if recs else "—")
+
+    if not recommended:
+        st.warning("本日のレースでは条件を満たすものがありませんでした。")
+        return
+
+    # 一覧表示
+    rows = []
+    for r in recommended:
+        race_df = df[df["race_id"] == r.race_id]
+        venue = race_df["venue"].iloc[0] if len(race_df) else "?"
+        race_num = str(r.race_id)[-2:]
+        title = race_df["race_title"].iloc[0] if "race_title" in race_df.columns and len(race_df) else ""
+
+        # 馬番→馬名マップ
+        name_map = {
+            int(row["post_number"]): row.get("horse_name", "?")
+            for _, row in race_df.iterrows()
+            if pd.notna(row.get("post_number"))
+        }
+        box_posts = sorted(r.top3_posts)
+        box_str = "-".join(str(n) for n in box_posts)
+        name_str = " / ".join(f"{n}{name_map.get(n, '?')[:6]}" for n in box_posts)
+
+        rows.append({
+            "レース": f"{venue}{race_num}R" + (f" {title}" if title else ""),
+            "買い目 (3連複BOX)": box_str,
+            "馬名": name_str,
+            "頭数": r.head_count,
+            "1位AI確率": f"{r.top1_prob:.1%}",
+            "3位AI確率": f"{r.top3_prob:.1%}",
+            "1番人気": f"{r.fav_post}番",
+        })
+
+    st.subheader("📋 推奨レース一覧")
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    total_invest = len(recommended) * 100
+    expected_return = total_invest * (SANRENPUKU_ROI / 100.0)
+    st.markdown(
+        f"**本日の想定投資**: {len(recommended)}レース × 100円 = **{total_invest:,}円**  \n"
+        f"**期待払戻 (長期ROI基準)**: {expected_return:,.0f}円 (期待収支 +{expected_return - total_invest:,.0f}円)"
+    )
+
+
+def _render_ev_mode(df: pd.DataFrame):
+    """従来の EV ベース買い目推奨（既存ロジック）"""
 
     # ── レース選択 ──
     st.subheader("🎯 対象レース選択")

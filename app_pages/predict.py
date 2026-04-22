@@ -10,6 +10,11 @@ from config.settings import DB_PATH
 from src.features.track_bias import get_track_bias_for_date
 from src.features.predict_features import build_prediction_features
 from src.model.train import load_model, FEATURE_COLUMNS, get_available_features
+from src.betting.sanrenpuku_filter import (
+    evaluate_race as evaluate_sanrenpuku,
+    STRATEGY_NAME as SANRENPUKU_STRATEGY,
+    EXPECTED_ROI as SANRENPUKU_ROI,
+)
 
 
 # ──────────────────────────────────────────────
@@ -407,10 +412,15 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
         else:
             prob_badge = f"　 {prob_pct}%"
 
+        # 3連複BOX推奨判定
+        sanren_rec = evaluate_sanrenpuku(race_df)
+
         label = f"**{venue} {race_num}R** — {surface}{distance}m ({condition})"
         if title:
             label += f" {title}"
         label += f"　　{prob_badge}"
+        if sanren_rec.is_recommended:
+            label += "　🎯 3連複BOX"
 
         with st.expander(label, expanded=is_expanded):
             # ── 再予測ボタン ──
@@ -480,6 +490,20 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
 
             if has_imputed_col and display.get("weight_imputed", pd.Series([False])).any():
                 st.caption("🌙 = 馬体重未発表のため前走値で補完（参考値）")
+
+            # ── 3連複BOX推奨の表示 ──
+            if sanren_rec.is_recommended:
+                box_str = "-".join(str(n) for n in sorted(sanren_rec.top3_posts))
+                st.success(
+                    f"🎯 **{SANRENPUKU_STRATEGY}** 推奨: **{box_str}**（1点・BOX）  \n"
+                    f"・頭数 {sanren_rec.head_count}頭 / 3位確率 {sanren_rec.top3_prob:.1%} "
+                    f"/ 1番人気 {sanren_rec.fav_post}番 (AI Top3内)  \n"
+                    f"・バックテスト実績 ROI {SANRENPUKU_ROI:.1f}% / 的中率 8.2%"
+                )
+            else:
+                with st.expander("🎯 3連複BOX推奨: 対象外", expanded=False):
+                    for r in sanren_rec.reasons:
+                        st.caption(f"・{r}")
 
             # 上位3頭のレーダーチャート的コメント
             top3 = race_df.head(3)
