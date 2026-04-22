@@ -614,7 +614,10 @@ def _run_db_prediction(target_date: str, venues: list[str], model_name: str):
     # 期待値・エッジ
     target_df["fukusho_odds"] = (target_df["odds"] * 0.3).clip(lower=1.1)
     target_df["expected_value"] = target_df["pred_prob"] * target_df["fukusho_odds"]
-    target_df["market_prob"] = (3.0 / target_df["odds"]).clip(upper=1.0)
+    # Plackett-Luce ベースの市場暗黙 top3 確率（旧式は本命帯で大幅過大評価）
+    from src.betting.market_implied import add_market_top3_column
+    target_df = add_market_top3_column(target_df, out_col="market_prob")
+    target_df["market_prob"] = target_df["market_prob"].fillna((3.0 / target_df["odds"]).clip(upper=1.0))
     target_df["edge"] = target_df["pred_prob"] - target_df["market_prob"]
 
     # 馬名取得

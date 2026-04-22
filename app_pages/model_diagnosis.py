@@ -117,7 +117,10 @@ def _run_weekly_check(model_name: str, n_weeks: int):
             0,
         )
         st.caption("複勝オッズ: 概算値 (単勝オッズ×0.3) ※実データ取得で精度向上")
-    recent["market_prob"] = (3.0 / recent["odds"]).clip(upper=1.0)
+    # Plackett-Luce ベースの市場暗黙 top3 確率（旧式は本命帯で+22〜31pt過大評価）
+    from src.betting.market_implied import add_market_top3_column
+    recent = add_market_top3_column(recent, out_col="market_prob")
+    recent["market_prob"] = recent["market_prob"].fillna((3.0 / recent["odds"]).clip(upper=1.0))
     recent["edge"] = recent["pred_prob"] - recent["market_prob"]
 
     # ── 週ごとの集計 ──
@@ -585,7 +588,10 @@ def _analyze_value_bet(df: pd.DataFrame) -> dict:
         df["fukusho_odds"] > 0, df["fukusho_odds"],
         (df["odds"] * 0.3).clip(lower=1.1),  # EV計算は概算使用
     )
-    df["market_prob"] = (3.0 / df["odds"]).clip(upper=1.0)
+    # Plackett-Luce ベースの市場暗黙 top3 確率（旧式は本命帯で大幅過大評価）
+    from src.betting.market_implied import add_market_top3_column
+    df = add_market_top3_column(df, out_col="market_prob")
+    df["market_prob"] = df["market_prob"].fillna((3.0 / df["odds"]).clip(upper=1.0))
     df["edge"] = df["pred_prob"] - df["market_prob"]
 
     results = {}

@@ -82,7 +82,10 @@ def _run_backtest(model_name, strategy, thresholds, min_odds, max_odds):
             0,
         )
     test_df["is_hit"] = (test_df["finish_position"] <= 3).astype(int)
-    test_df["market_prob"] = (3.0 / test_df["odds"]).clip(upper=1.0)
+    # Plackett-Luce ベースの市場暗黙 top3 確率（旧式「3/odds」は本命帯で+22〜31pt過大評価）
+    from src.betting.market_implied import add_market_top3_column
+    test_df = add_market_top3_column(test_df, out_col="market_prob")
+    test_df["market_prob"] = test_df["market_prob"].fillna((3.0 / test_df["odds"]).clip(upper=1.0))
     test_df["edge"] = test_df["pred_prob"] - test_df["market_prob"]
     # EV計算は概算オッズを使用（レース前に実複勝オッズは不明のため）
     test_df["ev"] = test_df["pred_prob"] * (test_df["odds"] * 0.3).clip(lower=1.1)

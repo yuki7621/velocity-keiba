@@ -121,8 +121,12 @@ def predict_and_display(target_date: str):
     target_df["estimated_fukusho_odds"] = (target_df["odds"] * 0.3).clip(lower=1.1)
     target_df["expected_value"] = target_df["pred_prob"] * target_df["estimated_fukusho_odds"]
 
-    # 市場の暗黙確率との差（エッジ）
-    target_df["market_implied_prob"] = (3.0 / target_df["odds"]).clip(upper=1.0)
+    # 市場の暗黙複勝確率（Plackett-Luce） — 旧「3/odds」は本命帯で大幅過大評価
+    from src.betting.market_implied import add_market_top3_column
+    target_df = add_market_top3_column(target_df, out_col="market_implied_prob")
+    target_df["market_implied_prob"] = target_df["market_implied_prob"].fillna(
+        (3.0 / target_df["odds"]).clip(upper=1.0)
+    )
     target_df["edge"] = target_df["pred_prob"] - target_df["market_implied_prob"]
 
     # レースごとに結果を表示

@@ -221,10 +221,12 @@ def run_value_bet_backtest(
         (test_df["odds"] >= min_odds) & (test_df["odds"] <= max_odds)
     ].copy()
 
-    # 市場の暗黙確率（複勝の場合、3頭的中なので概算で 3/オッズ に近いが、
-    # 単勝オッズからの概算として 1/オッズ を使い、複勝補正する）
-    # 複勝的中率の市場推定 ≒ 3 / 単勝オッズ（ただし上限1.0）
-    test_df["market_implied_prob"] = (3.0 / test_df["odds"]).clip(upper=1.0)
+    # 市場の暗黙 top3 確率を Plackett-Luce で計算（旧「3/odds」の本命帯バイアスを排除）
+    from src.betting.market_implied import add_market_top3_column
+    test_df = add_market_top3_column(test_df, out_col="market_implied_prob")
+    # オッズ未取得レースをフォールバック (3/odds) で埋める
+    fallback = (3.0 / test_df["odds"]).clip(upper=1.0)
+    test_df["market_implied_prob"] = test_df["market_implied_prob"].fillna(fallback)
 
     # エッジ = AI予測 - 市場評価
     test_df["edge"] = test_df["pred_prob"] - test_df["market_implied_prob"]
