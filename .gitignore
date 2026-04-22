@@ -29,6 +29,11 @@ Thumbs.db
 
 # ログ
 logs/
+*.log
+
+# バックテスト・チューニング出力
+*.csv
 
 # Claude Code ローカル設定
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
