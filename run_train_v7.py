@@ -3,6 +3,13 @@
 from src.features.build_features import build_all_features
 from src.model.train import train_model, save_model
 from src.evaluation.backtest import run_ev_backtest, run_value_bet_backtest, run_backtest
+from src.evaluation.multi_bet_backtest import (
+    run_wide_backtest,
+    run_umaren_backtest,
+    run_sanrenpuku_backtest,
+    run_sanrenpuku_formation,
+    run_wide_axis,
+)
 
 
 def main():
@@ -46,6 +53,23 @@ def main():
     for edge in [0.10, 0.15, 0.20, 0.25]:
         run_value_bet_backtest(model, df, edge_threshold=edge, min_odds=3.0, max_odds=100.0)
         print()
+
+    print("\n" + "=" * 60)
+    print("  バックテスト: 複数頭券種 (実払戻ベース)")
+    print("=" * 60)
+    print("\n--- ワイド ---")
+    run_wide_backtest(model, df, n_pick=2)
+    run_wide_backtest(model, df, n_pick=3)
+    run_wide_axis(model, df, n_body=5)
+
+    print("\n--- 馬連 ---")
+    run_umaren_backtest(model, df, n_pick=2)
+    run_umaren_backtest(model, df, n_pick=3)
+
+    print("\n--- 3連複 ---")
+    run_sanrenpuku_backtest(model, df, n_pick=3)
+    run_sanrenpuku_backtest(model, df, n_pick=4)
+    run_sanrenpuku_formation(model, df, n_head=1, n_body=5)
 
     print("\n" + "=" * 60)
     print("  学習完了 (v7)")
