@@ -87,9 +87,10 @@ def predict_and_display(target_date: str):
 
     # モデル読み込み（新しいバージョンから順にフォールバック）
     model = None
+    # v6 を最優先（v7 は脚質特徴量が逆効果だったため v6 より劣る。バックテスト実績で v6 > v7 確認済）
     for model_name, desc in [
-        ("lightgbm_v7", "Rankerアンサンブル + 血統 + 脚質/休養"),
-        ("lightgbm_v6", "Rankerアンサンブル + 血統特徴量"),
+        ("lightgbm_v6", "Rankerアンサンブル + 血統特徴量 【推奨】"),
+        ("lightgbm_v7", "Rankerアンサンブル + 血統 + 脚質/休養 (v6より劣る)"),
         ("lightgbm_v5", "Rankerアンサンブル"),
         ("lightgbm_v4", "v4"),
         ("lightgbm_v3", "v3"),

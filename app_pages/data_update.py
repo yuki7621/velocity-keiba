@@ -209,8 +209,8 @@ def _render_retrain():
 
     # 最後の学習日時を表示
     model_files = {
+        "lightgbm_v6 (推奨)": MODEL_DIR / "lightgbm_v6.pkl",
         "lightgbm_v7": MODEL_DIR / "lightgbm_v7.pkl",
-        "lightgbm_v6": MODEL_DIR / "lightgbm_v6.pkl",
         "lightgbm_v5": MODEL_DIR / "lightgbm_v5.pkl",
     }
     st.markdown("#### 現在のモデル")
@@ -236,8 +236,8 @@ def _render_retrain():
     with col1:
         model_choice = st.selectbox(
             "学習するモデル",
-            ["lightgbm_v7 (推奨)", "lightgbm_v6", "lightgbm_v5"],
-            help="v7 は血統+脚質+休養パターン特徴量を含みます。通常は v7 を使用してください。",
+            ["lightgbm_v6 (推奨)", "lightgbm_v7", "lightgbm_v5"],
+            help="v6 推奨。v7 の脚質/休養パターン特徴量はバックテストで v6 より劣ったため非推奨。",
         )
     with col2:
         st.markdown("")
