@@ -57,7 +57,7 @@ def render():
     with col3:
         intro_text = st.text_area(
             "冒頭あいさつ文（任意）",
-            value=f"こんにちは。本日も競馬AI「v6モデル」による予想をお届けします。",
+            value="こんにちは。本日も競馬AI「v6モデル」による予想をお届けします。",
             height=80,
             key="note_intro",
         )

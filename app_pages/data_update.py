@@ -209,7 +209,8 @@ def _render_retrain():
 
     # 最後の学習日時を表示
     model_files = {
-        "lightgbm_v6 (推奨)": MODEL_DIR / "lightgbm_v6.pkl",
+        "lightgbm_v8 (推奨)": MODEL_DIR / "lightgbm_v8.pkl",
+        "lightgbm_v6": MODEL_DIR / "lightgbm_v6.pkl",
         "lightgbm_v7": MODEL_DIR / "lightgbm_v7.pkl",
         "lightgbm_v5": MODEL_DIR / "lightgbm_v5.pkl",
     }
@@ -236,8 +237,12 @@ def _render_retrain():
     with col1:
         model_choice = st.selectbox(
             "学習するモデル",
-            ["lightgbm_v6 (推奨)", "lightgbm_v7", "lightgbm_v5"],
-            help="v6 推奨。v7 の脚質/休養パターン特徴量はバックテストで v6 より劣ったため非推奨。",
+            ["lightgbm_v8 (推奨)", "lightgbm_v6", "lightgbm_v7", "lightgbm_v5"],
+            help=(
+                "v8 推奨: 展開シナジー特徴量で v6 を AUC・複勝/単勝ROI 全項目で上回り (2026-04 検証)。\n"
+                "v6: 旧推奨。v8 が安定運用に乗るまでのフォールバック。\n"
+                "v7: 脚質/休養パターン特徴量だが v6 より劣るため非推奨（撤退モデル）。"
+            ),
         )
     with col2:
         st.markdown("")
@@ -245,7 +250,9 @@ def _render_retrain():
         run_btn = st.button("🧠 再学習を実行", type="primary", key="btn_retrain")
 
     if run_btn:
-        if "v7" in model_choice:
+        if "v8" in model_choice:
+            script = "run_train_v8.py"
+        elif "v7" in model_choice:
             script = "run_train_v7.py"
         elif "v6" in model_choice:
             script = "run_train_v6.py"

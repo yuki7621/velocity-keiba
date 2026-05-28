@@ -1,7 +1,6 @@
 """モデルの学習と予測 v4 — キャリブレーション対応"""
 
 import pickle
-from pathlib import Path
 
 import lightgbm as lgb
 import numpy as np
@@ -90,8 +89,8 @@ FEATURE_COLUMNS = [
     "horse_dist_jockey",          # 距離適性 × 騎手の実力
     "horse_form_x_jockey_recent", # 馬の近走調子 × 騎手の直近調子
     "horse_speed_x_dist_apt",     # スピード指数 × 距離適性
-    "jockey_top3_race_zscore",    # 騎手複勝率のレース内偏差値
-    "jockey_top3_race_rank",      # 騎手複勝率のレース内順位
+    "jockey_top3_rate_race_zscore",    # 騎手複勝率のレース内偏差値
+    "jockey_top3_rate_race_rank",      # 騎手複勝率のレース内順位
 
     # --- v5: 調教師特徴量 ---
     "trainer_win_rate",           # 調教師の通算勝率
@@ -117,6 +116,19 @@ FEATURE_COLUMNS = [
     "is_short_break",             # 中1〜2週
     "is_long_break",              # 半年以上の休み明け
     "rest_days_log",              # 休養日数の対数
+
+    # --- v8: 展開シナジー（レース全体の脚質構成 × 自分の脚質）---
+    "race_n_nigema",                  # レース内の主脚質=逃げ の馬数
+    "race_n_senko",                   # 主脚質=先行 の馬数
+    "race_n_sashi",                   # 主脚質=差し の馬数
+    "race_n_oikomi",                  # 主脚質=追込 の馬数
+    "race_pace_pressure",             # 全馬の (逃げ率+先行率) の平均 = ハイペース指数
+    "race_avg_main_style",            # レース内主脚質コードの平均 (前傾↔後傾)
+    "is_lone_nigema",                 # 自分が唯一の逃げ馬 = 楽逃げ候補
+    "pace_pressure_x_self_nige",      # ハイペース × 自分の逃げ率 (逃げ馬不利)
+    "pace_pressure_x_self_senko",     # ハイペース × 自分の先行率
+    "pace_pressure_x_self_oikomi",    # ハイペース × 自分の追込率 (追込有利)
+    "n_nigema_x_self_nige",           # 逃げ馬多 × 自分も逃げ = 共倒れリスク
 ]
 
 # 目的変数: 3着以内かどうか
@@ -131,7 +143,7 @@ def prepare_dataset(df: pd.DataFrame) -> pd.DataFrame:
     df[TARGET_COLUMN] = (df["finish_position"] <= 3).astype(int)
 
     # 存在しない特徴量列があれば除外
-    available = [c for c in FEATURE_COLUMNS if c in df.columns]
+    [c for c in FEATURE_COLUMNS if c in df.columns]
     missing = [c for c in FEATURE_COLUMNS if c not in df.columns]
     if missing:
         print(f"  ※ 未生成の特徴量を除外: {missing}")
@@ -179,7 +191,6 @@ class CalibratedLGBM:
 
     def _align_features(self, X) -> "pd.DataFrame":
         """学習時の特徴量リストに合わせてXを整列・補完する"""
-        import pandas as pd
         if hasattr(X, "columns"):
             missing = [f for f in self.training_features if f not in X.columns]
             if missing:

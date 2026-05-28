@@ -11,16 +11,12 @@
 """
 
 import sys
-import time
 from datetime import date, timedelta
 
-import numpy as np
 import pandas as pd
 
-from config.settings import DB_PATH, SCRAPE_INTERVAL_SEC
-from src.db.schema import create_tables
-from src.features.track_bias import get_track_bias_for_date, analyze_track_bias, get_race_day_results
-from src.model.train import load_model, FEATURE_COLUMNS, get_available_features
+from src.features.track_bias import get_track_bias_for_date
+from src.model.train import load_model, get_available_features
 from src.features.build_features import build_all_features
 
 
@@ -50,7 +46,7 @@ def show_track_bias_report(target_date: str, venues: list[str]):
             continue
 
         print(f"\n  【{venue}】 分析レース数: {bias['n_races']}R")
-        print(f"  ─────────────────────────────────")
+        print("  ─────────────────────────────────")
 
         # 内外バイアス
         gate_label = "内枠有利 ◎" if bias["gate_bias"] > 0.05 else \
@@ -86,11 +82,12 @@ def predict_and_display(target_date: str):
     df = build_all_features()
 
     # モデル読み込み（新しいバージョンから順にフォールバック）
+    # v8 を最優先（展開シナジー特徴量で v6 を全項目上回り。v7 は撤退モデル）
     model = None
-    # v6 を最優先（v7 は脚質特徴量が逆効果だったため v6 より劣る。バックテスト実績で v6 > v7 確認済）
     for model_name, desc in [
-        ("lightgbm_v6", "Rankerアンサンブル + 血統特徴量 【推奨】"),
-        ("lightgbm_v7", "Rankerアンサンブル + 血統 + 脚質/休養 (v6より劣る)"),
+        ("lightgbm_v8", "v6 + 展開シナジー特徴量 【推奨】"),
+        ("lightgbm_v6", "Rankerアンサンブル + 血統特徴量"),
+        ("lightgbm_v7", "v6 + 単体脚質/休養 (v6より劣る — 撤退モデル)"),
         ("lightgbm_v5", "Rankerアンサンブル"),
         ("lightgbm_v4", "v4"),
         ("lightgbm_v3", "v3"),
@@ -102,7 +99,7 @@ def predict_and_display(target_date: str):
         except FileNotFoundError:
             continue
     if model is None:
-        print("エラー: 学習済みモデルが見つかりません。先にrun_train_v6.pyを実行してください。")
+        print("エラー: 学習済みモデルが見つかりません。先にrun_train_v8.pyを実行してください。")
         return
 
     features = get_available_features(df)

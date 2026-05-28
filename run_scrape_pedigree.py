@@ -73,7 +73,7 @@ def main():
     finish_estimate = start_time + eta
 
     print("=" * 60)
-    print(f"血統情報スクレイピング開始")
+    print("血統情報スクレイピング開始")
     print(f"  対象: {total:,} 頭")
     print(f"  モード: {'全馬上書き' if fetch_all else '未取得のみ'}")
     print(f"  間隔: {SCRAPE_INTERVAL_SEC}秒")
@@ -88,7 +88,7 @@ def main():
         for i, hid in enumerate(horse_ids, 1):
             try:
                 result = scrape_pedigree(hid)
-            except Exception as e:
+            except Exception:
                 result = None
 
             if result:

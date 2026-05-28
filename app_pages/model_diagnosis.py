@@ -5,17 +5,15 @@
   2. 本格診断: 期間指定で全分析 → Claude用レポート出力
 """
 
-import sqlite3
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import date, timedelta
-from pathlib import Path
 
-from config.settings import DB_PATH, PROJECT_ROOT
+from config.settings import DB_PATH
 from src.model.train import (
-    load_model, FEATURE_COLUMNS, TARGET_COLUMN,
+    load_model, TARGET_COLUMN,
     prepare_dataset, get_available_features,
 )
 
@@ -63,7 +61,7 @@ def _render_weekly_check():
     with col1:
         model_name = st.selectbox(
             "モデル",
-            ["lightgbm_v6", "lightgbm_v7", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
+            ["lightgbm_v8", "lightgbm_v6", "lightgbm_v7", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
             key="weekly_model",
         )
     with col2:
@@ -126,8 +124,6 @@ def _run_weekly_check(model_name: str, n_weeks: int):
     # ── 週ごとの集計 ──
     weekly_stats = []
     for week, wdf in recent.groupby("week"):
-        # 全体統計
-        n_total = len(wdf)
         n_races = wdf["race_id"].nunique()
 
         # エッジ >= 0.1 のバリューベットのみ
@@ -232,7 +228,7 @@ def _run_weekly_check(model_name: str, n_weeks: int):
         yaxis_title="回収率 (%)", xaxis_title="週",
         height=350, margin=dict(t=10),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     st.subheader("📈 的中率の推移")
     fig2 = go.Figure()
@@ -252,7 +248,7 @@ def _run_weekly_check(model_name: str, n_weeks: int):
         yaxis_title="的中率 (%)", xaxis_title="週",
         height=350, margin=dict(t=10),
     )
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width='stretch')
 
     # ── 週別テーブル ──
     st.subheader("📋 週別データ")
@@ -267,7 +263,7 @@ def _run_weekly_check(model_name: str, n_weeks: int):
 
     st.dataframe(
         disp[["週", "レース数", "賭け数", "複勝的中率", "複勝回収率", "単勝的中率", "単勝回収率"]],
-        use_container_width=True, hide_index=True,
+        width='stretch', hide_index=True,
     )
 
     # ── 異変アラート ──
@@ -312,7 +308,7 @@ def _render_full_diagnosis():
     with col1:
         model_name = st.selectbox(
             "分析するモデル",
-            ["lightgbm_v6", "lightgbm_v7", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
+            ["lightgbm_v8", "lightgbm_v6", "lightgbm_v7", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"],
             key="diag_model",
         )
     with col2:
@@ -426,8 +422,6 @@ def _analyze_overall(df: pd.DataFrame) -> dict:
     actual_top3 = df[TARGET_COLUMN].sum()
     pred_positive = (df["pred_prob"] >= 0.5).sum()
     tp = ((df["pred_prob"] >= 0.5) & (df[TARGET_COLUMN] == 1)).sum()
-    fp = ((df["pred_prob"] >= 0.5) & (df[TARGET_COLUMN] == 0)).sum()
-    fn = ((df["pred_prob"] < 0.5) & (df[TARGET_COLUMN] == 1)).sum()
 
     precision = tp / pred_positive if pred_positive > 0 else 0
     recall = tp / actual_top3 if actual_top3 > 0 else 0
@@ -540,12 +534,33 @@ def _analyze_miss_patterns(df: pd.DataFrame) -> dict:
 
 
 def _analyze_features(model, features, df) -> dict:
-    """特徴量の重要度と実際の相関"""
-    importance = pd.Series(model.feature_importances_, index=features)
+    """特徴量の重要度と実際の相関
+
+    モデルが持つ学習時の特徴量リスト (`training_features` / `feature_name_`) を
+    使うことで、`FEATURE_COLUMNS` が学習後に拡張されたモデル（v6 等）でも
+    importance との長さズレを起こさないようにする。
+    """
+    # モデルの学習時特徴量を優先（無ければ feature_name_、最後に渡された features）
+    train_features = (
+        getattr(model, "training_features", None)
+        or getattr(model, "feature_name_", None)
+        or list(features)
+    )
+    importance_arr = model.feature_importances_
+
+    if len(importance_arr) != len(train_features):
+        # それでも合わなければ短い方に揃える（壊れるよりはマシ）
+        n = min(len(importance_arr), len(train_features))
+        train_features = list(train_features)[:n]
+        importance_arr = importance_arr[:n]
+
+    importance = pd.Series(importance_arr, index=train_features)
     importance = importance.sort_values(ascending=False)
 
+    # 相関分析は df 上に存在する特徴量で計算（学習時 + 追加特徴量どちらもOK）
+    corr_targets = list(set(list(train_features) + list(features)))
     correlations = {}
-    for feat in features:
+    for feat in corr_targets:
         if feat in df.columns and df[feat].notna().sum() > 100:
             corr = df[feat].corr(df[TARGET_COLUMN].astype(float))
             correlations[feat] = round(corr, 4) if pd.notna(corr) else 0
@@ -649,7 +664,7 @@ def _display_analysis(sections: dict):
             xaxis_title="予測確率", yaxis_title="実際の3着内率",
             height=300, margin=dict(t=10),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         st.dataframe(
             cal[["prob_bucket", "count", "avg_pred", "actual_rate", "gap"]].rename(
@@ -658,7 +673,7 @@ def _display_analysis(sections: dict):
                     "avg_pred": "予測平均", "actual_rate": "実際の率", "gap": "ギャップ",
                 }
             ),
-            use_container_width=True, hide_index=True,
+            width='stretch', hide_index=True,
         )
 
     # ── カテゴリ別 ──
@@ -673,7 +688,7 @@ def _display_analysis(sections: dict):
         if isinstance(data, pd.DataFrame) and len(data) > 0:
             st.subheader(f"📊 {label}")
             display_cols = [c for c in data.columns if not c.startswith("_")]
-            st.dataframe(data[display_cols], use_container_width=True, hide_index=True)
+            st.dataframe(data[display_cols], width='stretch', hide_index=True)
 
     # ── ミスパターン ──
     st.subheader("⚠️ 予測ミスのパターン")
@@ -722,7 +737,7 @@ def _display_analysis(sections: dict):
                 "平均オッズ": f"{stats['avg_odds']:.1f}",
                 "平均エッジ": f"{stats['avg_edge']:.3f}",
             })
-        st.dataframe(pd.DataFrame(vb_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(vb_rows), width='stretch', hide_index=True)
 
 
 # ══════════════════════════════════════════════
@@ -753,8 +768,8 @@ def _generate_report(
     lines.append(f"- テスト期間: {period}")
     lines.append(f"- サンプル数: {o['n_samples']}")
     lines.append(f"- 使用特徴量数: {len(features)}")
-    lines.append(f"- 目的変数: 3着以内（二値分類）")
-    lines.append(f"- アルゴリズム: LightGBM")
+    lines.append("- 目的変数: 3着以内（二値分類）")
+    lines.append("- アルゴリズム: LightGBM")
     lines.append("")
 
     lines.append("## 2. 全体精度")
@@ -910,7 +925,7 @@ def _auto_suggest(sections: dict) -> list[str]:
     cal = sections["calibration"]
     mp = sections["miss_patterns"]
     fi = sections["feature_importance"]
-    vb = sections["value_bet"]
+    sections["value_bet"]
 
     if len(cal) > 0:
         max_gap = cal["gap"].abs().max()
@@ -954,7 +969,7 @@ def _auto_suggest(sections: dict) -> list[str]:
             f"高確率ミスが{mp['high_conf_miss_count']}件。"
             f"過信している傾向がある。"
             + (f"馬場状態{mp.get('miss_condition', '')}や" if "miss_condition" in mp else "")
-            + f"休養明けの馬への対策を検討。"
+            + "休養明けの馬への対策を検討。"
         )
 
     if mp["low_conf_hit_count"] > 200:
@@ -962,7 +977,7 @@ def _auto_suggest(sections: dict) -> list[str]:
             f"見逃し（低確率的中）が{mp['low_conf_hit_count']}件。"
             f"穴馬検出力が弱い。"
             + (f"平均オッズ{mp.get('sleeper_avg_odds', 0):.1f}倍の人気薄に対する" if "sleeper_avg_odds" in mp else "")
-            + f"特徴量（血統、トラックバイアスの深掘りなど）の追加を検討。"
+            + "特徴量（血統、トラックバイアスの深掘りなど）の追加を検討。"
         )
 
     if o["auc"] < 0.70:

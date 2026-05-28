@@ -4,10 +4,9 @@ import sqlite3
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from config.settings import DB_PATH
-from src.features.track_bias import get_track_bias_for_date
 from src.features.predict_features import build_prediction_features
 from src.model.train import load_model, FEATURE_COLUMNS, get_available_features
 from src.betting.sanrenpuku_filter import (
@@ -75,8 +74,8 @@ def _render_pre_race_prediction():
 
     with col2:
         model_name = st.selectbox(
-            "モデル", ["lightgbm_v6", "lightgbm_v7", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="prerace_model",
-            help="v6 推奨 (バックテスト実績で v7 より全券種で優位)"
+            "モデル", ["lightgbm_v8", "lightgbm_v6", "lightgbm_v7", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="prerace_model",
+            help="v8 推奨 (展開シナジー特徴量追加で v6 を全項目上回り。v7 は撤退モデル)"
         )
 
     with col3:
@@ -157,8 +156,14 @@ def _predict_single_race(
     model,
     impute_weight: bool = False,
 ) -> pd.DataFrame | None:
-    """単一レースの出馬表を取得 → 特徴量構築 → 予測。失敗時はNone。"""
+    """単一レースの出馬表を取得 → 特徴量構築 → 予測。失敗時はNone。
+
+    出馬表に加え、netkeibaの単勝オッズも取得して `odds` 列に格納する。
+    オッズが取得できれば edge / expected_value も計算する。
+    （発走前にはオッズが未確定でNaNになることがあるため、失敗してもfeat_dfは返す）
+    """
     from src.scraper.race_card import scrape_race_card
+    from src.scraper.odds import fetch_all_odds
 
     try:
         card = scrape_race_card(race_id)
@@ -184,6 +189,38 @@ def _predict_single_race(
     if len(feat_df) == 0:
         return None
 
+    # 単勝オッズを取得して `odds` 列に追加（取得失敗してもNaNで継続）
+    odds_fetched_at = datetime.now().strftime("%H:%M:%S")
+    odds_official_dt = None
+    try:
+        odds_dict = fetch_all_odds(race_id)
+        tansho = odds_dict.get("tansho", {}) if odds_dict else {}
+        odds_official_dt = odds_dict.get("official_datetime") if odds_dict else None
+    except Exception as e:
+        st.warning(f"⚠️ {race_id}: オッズ取得エラー ({e}) — 予測のみ継続")
+        tansho = {}
+
+    if tansho:
+        # post_number(int) → 文字列キー("1", "2", ...) でマッピング
+        feat_df["odds"] = feat_df["post_number"].apply(
+            lambda p: tansho.get(str(int(p))) if pd.notna(p) else None
+        )
+        feat_df["odds_fetched_at"] = odds_fetched_at
+        feat_df["odds_official_dt"] = odds_official_dt or ""
+        # デバッグ用: fetch直後の生tanshoをsession_stateに保存（レース別）
+        try:
+            st.session_state.setdefault("odds_debug", {})[race_id] = {
+                "fetched_at": odds_fetched_at,
+                "official_dt": odds_official_dt,
+                "tansho": dict(tansho),
+            }
+        except Exception:
+            pass
+    else:
+        feat_df["odds"] = np.nan
+        feat_df["odds_fetched_at"] = ""
+        feat_df["odds_official_dt"] = ""
+
     # 欠損カラムは0で埋める
     for mc in [c for c in FEATURE_COLUMNS if c not in feat_df.columns]:
         feat_df[mc] = 0.0
@@ -191,6 +228,21 @@ def _predict_single_race(
     X = feat_df[FEATURE_COLUMNS].astype(float)
     feat_df["pred_prob"] = model.predict_proba(X)[:, 1]
     feat_df["race_title"] = race_info.get("title", "")
+    feat_df["start_time"] = race_info.get("start_time", "")  # 発走時刻 (HH:MM)
+
+    # edge / expected_value（オッズがあれば計算）
+    if feat_df["odds"].notna().any():
+        from src.betting.market_implied import add_market_top3_column
+        feat_df = add_market_top3_column(feat_df, out_col="market_prob")
+        # Plackett-Luce が NaN の行は旧式（3/odds）でフォールバック
+        fallback = (3.0 / feat_df["odds"]).clip(upper=1.0)
+        feat_df["market_prob"] = feat_df["market_prob"].fillna(fallback)
+        feat_df["edge"] = feat_df["pred_prob"] - feat_df["market_prob"]
+        feat_df["expected_value"] = feat_df["pred_prob"] * (feat_df["odds"] * 0.3).clip(lower=1.1)
+    else:
+        feat_df["market_prob"] = np.nan
+        feat_df["edge"] = np.nan
+        feat_df["expected_value"] = np.nan
 
     return feat_df
 
@@ -363,7 +415,7 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
     })
     st.dataframe(
         display_top[["競馬場", "レース", "馬番", "馬名", "騎手", "AI確率"]],
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
     )
 
@@ -372,8 +424,8 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
     # ── レースごとの詳細 ──
     st.subheader("📋 レース別予測")
 
-    # 一括展開/畳むボタン
-    btn_col_expand, btn_col_collapse, _ = st.columns([1, 1, 4])
+    # 一括展開/畳む + ソート方式選択
+    btn_col_expand, btn_col_collapse, sort_col, _ = st.columns([1, 1, 2, 2])
     with btn_col_expand:
         if st.button("📂 全て展開", key="btn_expand_all_prerace"):
             st.session_state["prerace_expand_mode"] = "all"
@@ -382,10 +434,41 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
         if st.button("📁 全て畳む", key="btn_collapse_all_prerace"):
             st.session_state["prerace_expand_mode"] = "none"
             st.rerun()
+    with sort_col:
+        sort_mode = st.radio(
+            "並び順",
+            ["⏱ 発走時間順", "🏟 競馬場別"],
+            horizontal=True,
+            key="prerace_sort_mode",
+            index=0,  # デフォルト: 発走時間順
+            label_visibility="collapsed",
+        )
 
     expand_mode = st.session_state.get("prerace_expand_mode", "auto")
 
-    for race_id in sorted(df["race_id"].unique()):
+    # ── ソート順を決定 ──
+    # 各 race_id について (start_time, race_id) のタプルを作る
+    # start_time が無い場合は race_id 末尾2桁 (R番号) で代用
+    def _race_sort_key(race_id: str, mode: str) -> tuple:
+        sub = df[df["race_id"] == race_id]
+        st_raw = ""
+        if "start_time" in sub.columns:
+            stv = sub["start_time"].dropna()
+            stv = stv[stv != ""]
+            if len(stv) > 0:
+                st_raw = stv.iloc[0]
+        venue_v = sub["venue"].iloc[0] if "venue" in sub.columns and len(sub) else ""
+        race_num = str(race_id)[-2:]
+
+        if mode == "⏱ 発走時間順":
+            # start_time → R番号 → race_id の順でフォールバック
+            return (st_raw or f"99:{race_num}", venue_v, race_id)
+        # 競馬場別: 会場名 → 発走時刻 → race_id
+        return (venue_v, st_raw or f"99:{race_num}", race_id)
+
+    sorted_race_ids = sorted(df["race_id"].unique(), key=lambda rid: _race_sort_key(rid, sort_mode))
+
+    for race_id in sorted_race_ids:
         race_df = df[df["race_id"] == race_id].sort_values("pred_prob", ascending=False)
 
         venue = race_df["venue"].iloc[0] if pd.notna(race_df["venue"].iloc[0]) else "?"
@@ -416,12 +499,39 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
         # 3連複BOX推奨判定
         sanren_rec = evaluate_sanrenpuku(race_df)
 
-        label = f"**{venue} {race_num}R** — {surface}{distance}m ({condition})"
+        # 順位帯の最高ランク (🎯🎯 がいるかチェック) — race_df は pred_prob 降順済み
+        has_strong_rank_band = False
+        has_rank_band = False
+        if "odds" in race_df.columns:
+            for i, (_, row) in enumerate(race_df.iterrows(), start=1):
+                o = row.get("odds")
+                if pd.isna(o):
+                    continue
+                if 30.0 <= o < 40.0:
+                    continue
+                if i in (2, 3) and 20.0 <= o <= 50.0:
+                    has_strong_rank_band = True
+                    break
+                if i in (1, 2) and 10.0 <= o < 20.0:
+                    has_rank_band = True
+
+        # 発走時刻があればラベル先頭に表示
+        st_label = ""
+        if "start_time" in race_df.columns:
+            stv = race_df["start_time"].dropna()
+            stv = stv[stv != ""]
+            if len(stv) > 0:
+                st_label = f"⏱{stv.iloc[0]} "
+        label = f"**{st_label}{venue} {race_num}R** — {surface}{distance}m ({condition})"
         if title:
             label += f" {title}"
         label += f"　　{prob_badge}"
         if sanren_rec.is_recommended:
             label += "　🎯 3連複BOX"
+        if has_strong_rank_band:
+            label += "　🎯🎯 順位帯"
+        elif has_rank_band:
+            label += "　🎯 順位帯"
 
         with st.expander(label, expanded=is_expanded):
             # ── 再予測ボタン ──
@@ -431,39 +541,90 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
                     _repredict_single_race(race_id, target_date, model_name)
                     st.rerun()
             with btn_col2:
-                # 馬体重の取得状況を表示
+                # 馬体重 + オッズ取得時刻を表示
                 hw_count = race_df["horse_weight"].notna().sum() if "horse_weight" in race_df.columns else 0
                 hw_total = len(race_df)
                 if hw_count == 0:
-                    st.caption("⚠️ 馬体重未公開（発走30分前頃に公開）")
+                    weight_msg = "⚠️ 馬体重未公開（発走30分前頃に公開）"
                 elif hw_count < hw_total:
-                    st.caption(f"⚠️ 馬体重 {hw_count}/{hw_total} 頭のみ取得済み")
+                    weight_msg = f"⚠️ 馬体重 {hw_count}/{hw_total} 頭のみ取得済み"
                 else:
-                    st.caption(f"✅ 馬体重 全{hw_total}頭取得済み")
+                    weight_msg = f"✅ 馬体重 全{hw_total}頭取得済み"
+
+                # オッズ取得時刻 + netkeiba 側更新時刻（official_dt）
+                fetched_at = ""
+                official_dt = ""
+                if "odds_fetched_at" in race_df.columns:
+                    vals = race_df["odds_fetched_at"].dropna()
+                    vals = vals[vals != ""]
+                    if len(vals) > 0:
+                        fetched_at = vals.iloc[0]
+                if "odds_official_dt" in race_df.columns:
+                    ovals = race_df["odds_official_dt"].dropna()
+                    ovals = ovals[ovals != ""]
+                    if len(ovals) > 0:
+                        official_dt = ovals.iloc[0]
+                if fetched_at:
+                    msg = f"📡 取得 {fetched_at}"
+                    if official_dt:
+                        msg += f" ｜ netkeiba更新時刻 {official_dt}"
+                    st.caption(f"{weight_msg} ｜ {msg}")
+                else:
+                    st.caption(f"{weight_msg} ｜ ⚠️ オッズ未取得")
 
             cols_src = [
                 "post_number", "gate_number", "horse_name", "jockey_name",
                 "weight_carried", "horse_weight", "pred_prob",
             ]
+            # オッズ系列（取得済みなら）
+            has_odds_col = "odds" in race_df.columns and race_df["odds"].notna().any()
+            if has_odds_col:
+                cols_src += ["odds", "expected_value", "edge"]
             # weight_imputed 列が存在すれば含める
             has_imputed_col = "weight_imputed" in race_df.columns
             if has_imputed_col:
                 cols_src.append("weight_imputed")
 
             display = race_df[cols_src].copy()
+            # AI順位 (race_df は pred_prob 降順でソート済み) — 1始まり
+            display["ai_rank"] = range(1, len(display) + 1)
+            # 相対AI確率（レース内で正規化 = 全頭の合計が100%）
+            # AI確率は「独立した3着以内確率」なので合計が約300%近くになる。
+            # それをレース内で正規化することで「他馬と比べての相対的な強さ」を示す。
+            race_prob_sum = display["pred_prob"].sum()
+            if race_prob_sum > 0:
+                display["normalized_prob"] = display["pred_prob"] / race_prob_sum
+            else:
+                display["normalized_prob"] = 0.0
 
-            # 推奨マーク
-            def _mark(prob):
-                if prob >= 0.50:
-                    return "★★★"
-                elif prob >= 0.40:
-                    return "★★"
-                elif prob >= 0.30:
-                    return "★"
-                return ""
+            # 推奨マーク（オッズがあればedge/EVベース、なければAI確率ベース）
+            if has_odds_col:
+                def _mark(row):
+                    edge = row.get("edge")
+                    ev = row.get("expected_value")
+                    if pd.isna(edge) or pd.isna(ev):
+                        return ""
+                    if edge >= 0.15 and ev >= 1.0:
+                        return "★★★"
+                    elif edge >= 0.10 and ev >= 0.8:
+                        return "★★"
+                    elif edge >= 0.05:
+                        return "★"
+                    return ""
+                display["推奨"] = display.apply(_mark, axis=1)
+            else:
+                def _mark_prob(prob):
+                    if prob >= 0.50:
+                        return "★★★"
+                    elif prob >= 0.40:
+                        return "★★"
+                    elif prob >= 0.30:
+                        return "★"
+                    return ""
+                display["推奨"] = display["pred_prob"].apply(_mark_prob)
 
-            display["推奨"] = display["pred_prob"].apply(_mark)
             display["AI確率"] = display["pred_prob"].apply(lambda x: f"{x:.1%}")
+            display["相対%"] = display["normalized_prob"].apply(lambda x: f"{x:.1%}")
             display["馬番"] = display["post_number"].astype(int)
             display["枠番"] = display["gate_number"].astype(int)
             display["斤量"] = display["weight_carried"].apply(
@@ -483,11 +644,160 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
             display["馬名"] = display["horse_name"]
             display["騎手"] = display["jockey_name"]
 
+            if has_odds_col:
+                # オッズ帯マーク (v8 診断結果 × 個別馬エッジ):
+                #   バックテスト実証で ROI 100% 超えに必要なのは **edge≥0.10**
+                #   (edge≥0.05 だと 15-20帯で 103%、25-30帯で 100% と帯依存で不安定)
+                #
+                #   <5倍   ⛔ 本命過熱  (帯起因の赤字、エッジ無関係に警告)
+                #   5-10倍 ⚠️ 要注意    (帯起因の弱い赤字、エッジ無関係に警告)
+                #   10-30倍 + edge≥0.10 → 🟢       (15-20帯 ROI 104.1%)
+                #          + edge<0.10  → ○        (帯OKだがエッジ不足、ROI <100%)
+                #   30-40倍 ⛔ 鬼門帯   (高エッジでも構造的赤字)
+                #   40-50倍 + edge≥0.10 → 🟢🟢高ROI (ROI 128.9%)
+                #          + edge<0.10  → ○        (帯OKだがエッジ不足)
+                #   >50倍   🌪️ 大穴    (分散大)
+                def _odds_warn(row):
+                    o = row.get("odds")
+                    e = row.get("edge")
+                    if pd.isna(o):
+                        return ""
+                    if o < 5.0:
+                        return "⛔本命過熱"
+                    if o < 10.0:
+                        return "⚠️要注意"
+                    if 30.0 <= o < 40.0:
+                        return "⛔鬼門帯"
+                    if o > 50.0:
+                        return "🌪️大穴"
+                    # 10-30倍 or 40-50倍 (中穴 / 高ROI 帯)
+                    edge_ok = pd.notna(e) and e >= 0.10
+                    is_high_roi_band = 40.0 <= o <= 50.0
+                    if not edge_ok:
+                        return "○"  # 帯は良いがエッジ不足 (ROI<100% 想定)
+                    return "🟢🟢高ROI" if is_high_roi_band else "🟢"
+
+                # ── AI順位 × オッズ帯 のクロス基準 (v8 バックテスト実績ベース) ──
+                # 複勝ROI が 100% 超えのセグメント（複勝券で買った場合）:
+                #   AI 1位 × 単勝10-20倍 → 複勝ROI 108%   🎯
+                #   AI 2位 × 単勝10-20倍 → 複勝ROI 101%   🎯
+                #   AI 2位 × 単勝20-50倍 → 複勝ROI 145%   🎯🎯 (最強・本命枠)
+                #   AI 3位 × 単勝20-50倍 → 複勝ROI 130%   🎯🎯
+                # 鬼門帯30-40倍は順位無関係に除外
+                def _rank_band_mark(row):
+                    rank = row.get("ai_rank")
+                    o = row.get("odds")
+                    if pd.isna(rank) or pd.isna(o):
+                        return ""
+                    rank = int(rank)
+                    # 30-40倍は鬼門帯（複勝ROI 64%等）なので順位関係なく除外
+                    if 30.0 <= o < 40.0:
+                        return ""
+                    # 🎯🎯 高信頼プラス (ROI 130%超)
+                    if rank in (2, 3) and 20.0 <= o <= 50.0:
+                        return "🎯🎯"
+                    # 🎯 プラス (ROI 100-110%)
+                    if rank in (1, 2) and 10.0 <= o < 20.0:
+                        return "🎯"
+                    return ""
+
+                display["AI順位"] = display["ai_rank"].apply(lambda r: f"{int(r)}位")
+                display["ｵｯｽﾞ"] = display["odds"].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-")
+                display["帯"] = display.apply(_odds_warn, axis=1)
+                display["順位帯"] = display.apply(_rank_band_mark, axis=1)
+                display["期待値"] = display["expected_value"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
+                display["エッジ"] = display["edge"].apply(lambda x: f"{x:+.3f}" if pd.notna(x) else "-")
+                show_cols = ["枠番", "馬番", "馬名", "騎手", "斤量", "体重", "AI順位", "AI確率", "相対%", "ｵｯｽﾞ", "帯", "順位帯", "期待値", "エッジ", "推奨"]
+            else:
+                show_cols = ["枠番", "馬番", "馬名", "騎手", "斤量", "体重", "AI確率", "相対%", "推奨"]
+
             st.dataframe(
-                display[["枠番", "馬番", "馬名", "騎手", "斤量", "体重", "AI確率", "推奨"]],
-                use_container_width=True,
+                display[show_cols],
+                width='stretch',
                 hide_index=True,
             )
+
+            # 🔍 オッズデバッグ (取得値とDataFrameに格納された値を比較)
+            with st.expander("🔍 オッズデバッグ（生取得値 vs 表示値の比較）", expanded=False):
+                debug_dict = st.session_state.get("odds_debug", {}).get(race_id)
+                if debug_dict:
+                    official_dt_dbg = debug_dict.get('official_dt') or '不明'
+                    st.caption(
+                        f"クライアント取得時刻 (fetched_at): **{debug_dict['fetched_at']}**  |  "
+                        f"netkeiba API が報告する公式更新時刻 (official_dt): **{official_dt_dbg}**  \n"
+                        f"⚠️ netkeiba 画面と値が違う場合はこの 2つの時刻差を確認してください "
+                        f"（official_dt が古ければ netkeiba 側 API のキャッシュ／更新間隔の問題）"
+                    )
+                    raw_tansho = debug_dict["tansho"]
+                    rows_dbg = []
+                    for _, r in race_df.sort_values("post_number").iterrows():
+                        pn = int(r["post_number"]) if pd.notna(r["post_number"]) else None
+                        rows_dbg.append({
+                            "馬番": pn,
+                            "馬名": r.get("horse_name", "?"),
+                            "raw_tansho (API)": raw_tansho.get(str(pn)) if pn is not None else None,
+                            "feat_df.odds (表示)": r.get("odds"),
+                            "差分": (
+                                "✅ 一致"
+                                if pn is not None and raw_tansho.get(str(pn)) == r.get("odds")
+                                else "❌ 不一致"
+                            ),
+                        })
+                    st.dataframe(pd.DataFrame(rows_dbg), width='stretch', hide_index=True)
+                    st.caption(
+                        "💡 全行「✅一致」なら fetch は正常 → netkeiba側オッズが古い可能性。"
+                        "「❌不一致」が出たらコード側のバグです。"
+                    )
+                else:
+                    st.info("このレースのオッズデバッグデータがありません。再予測ボタンを押してください。")
+
+            if has_odds_col:
+                # AI Top3 内に本命過熱帯（<5倍）の馬がいればレース単位で警告
+                top3_overheated = race_df.head(3)[
+                    race_df.head(3)["odds"].notna() & (race_df.head(3)["odds"] < 5.0)
+                ]
+                if len(top3_overheated) > 0:
+                    posts = ", ".join(f"{int(p)}番({o:.1f}倍)" for p, o in
+                                       zip(top3_overheated["post_number"], top3_overheated["odds"]))
+                    st.warning(
+                        f"⛔ **本命過熱警告**: AI Top3 内に単勝<5倍の馬がいます ({posts})。  \n"
+                        f"v6 診断ではこの帯のROIは49〜61%（控除率20%を超える赤字）。"
+                        f"購入する場合はオッズ帯フィルタ適用後の買い目推奨ページを利用してください。"
+                    )
+                # 30-40倍の鬼門帯に AI 上位馬がいる場合の警告
+                top5_kimon = race_df.head(5)[
+                    race_df.head(5)["odds"].notna()
+                    & (race_df.head(5)["odds"] >= 30.0)
+                    & (race_df.head(5)["odds"] < 40.0)
+                ]
+                if len(top5_kimon) > 0:
+                    posts = ", ".join(f"{int(p)}番({o:.1f}倍)" for p, o in
+                                       zip(top5_kimon["post_number"], top5_kimon["odds"]))
+                    st.warning(
+                        f"⛔ **鬼門帯警告**: AI Top5 内に 30-40倍の馬がいます ({posts})。  \n"
+                        f"v8 診断ではこの帯のROIは43〜69%（10-30倍と40-50倍の両側はプラス、ここだけ赤字）。"
+                        f"買うなら 15-20倍 or 40-50倍 にずらすほうが期待値が高くなります。"
+                    )
+                st.caption(
+                    "📊 オッズ帯凡例 (v8 診断 × 個別馬エッジ ≥0.10 でROI100%超え): "
+                    "⛔本命過熱(<5倍) / ⚠️要注意(5-10倍) / "
+                    "🟢エッジ帯(10-30倍 ∧ edge≥0.10, 15-20帯**ROI 104.1%**) / "
+                    "○帯OKだがエッジ不足 (ROI <100%想定) / "
+                    "⛔鬼門帯(30-40倍, 構造的赤字) / "
+                    "🟢🟢高ROI(40-50倍 ∧ edge≥0.10, **ROI 128.9%**) / 🌪️大穴(>50倍)"
+                )
+                st.caption(
+                    "🎯 順位帯凡例 (AI順位×単勝オッズ帯, **複勝券**で買った場合のROI): "
+                    "🎯🎯= AI 2-3位 × 20-50倍 (**複勝ROI 130-145%**) / "
+                    "🎯 = AI 1-2位 × 10-20倍 (**複勝ROI 101-108%**) / "
+                    "（鬼門帯30-40倍は除外）"
+                )
+                st.caption(
+                    "📐 確率2列の違い: **AI確率**=その馬が3着以内に入る独立確率（レース内合計≈300%）"
+                    " / **相対%**=レース内で正規化した相対的な強さ（合計100%）"
+                )
+            else:
+                st.caption("⚠️ オッズが取得できなかったため、期待値・エッジ・3連複BOX判定はスキップされています。")
 
             if has_imputed_col and display.get("weight_imputed", pd.Series([False])).any():
                 st.caption("🌙 = 馬体重未発表のため前走値で補完（参考値）")
@@ -573,8 +883,8 @@ def _render_db_prediction():
 
     with col3:
         model_name = st.selectbox(
-            "モデル", ["lightgbm_v6", "lightgbm_v7", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="db_model",
-            help="v6 推奨 (バックテスト実績で v7 より全券種で優位)"
+            "モデル", ["lightgbm_v8", "lightgbm_v6", "lightgbm_v7", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], key="db_model",
+            help="v8 推奨 (展開シナジー特徴量追加で v6 を全項目上回り)"
         )
 
     conn.close()
@@ -692,7 +1002,7 @@ def _run_db_prediction(target_date: str, venues: list[str], model_name: str):
         vb_display["レース"] = vb_display["レースID"].apply(lambda x: f"{str(x)[-2:]}R")
         st.dataframe(
             vb_display[["競馬場", "レース", "馬番", "馬名", "AI確率", "単勝ｵｯｽﾞ", "期待値", "エッジ"]],
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
         )
     else:
@@ -774,6 +1084,6 @@ def _run_db_prediction(target_date: str, venues: list[str], model_name: str):
 
             st.dataframe(
                 display[["馬番", "馬名", "AI確率", "ｵｯｽﾞ", "期待値", "エッジ", "推奨", "着順"]],
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )

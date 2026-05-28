@@ -23,32 +23,67 @@ TYPE_SANRENTAN = 8   # 三連単
 
 
 def _fetch_odds_json(race_id: str, odds_type: int) -> Optional[dict]:
-    """オッズAPIから生のJSONを取得"""
-    params = {
+    """オッズAPIから生のJSONを取得
+
+    重要: netkeiba の `api_get_jra_odds.html` は `action` パラメータで挙動が変わる:
+      - action='init'   → 発売開始時点のスナップショット（数十分単位で固定された古いデータ）
+      - action='update' → **直近の実オッズ**（パリミューチュエル方式の現在値）
+    JS は初回 init / 以降 update でポーリングしているが、Python から叩く分には
+    最初から update を使えば現在値が取れる。init にフォールバックも用意。
+
+    また、`pid=api_get_jra_odds` と `output=jsonp` + `callback` を付ける必要がある
+    （netkeiba 公式 JS と同じパラメータ構成）。
+    """
+    import time as _time
+
+    callback_name = f"jQuery_{int(_time.time() * 1000)}"
+    base_params = {
+        "pid": "api_get_jra_odds",
         "race_id": race_id,
         "type": odds_type,
-        "action": "init",
+        # sort: "ninki" だとレスポンスのキーが「人気順位」になり馬番と入れ替わる。
+        # "odds"（または未指定）でレスポンスキー = 馬番（"01","02"...）になる。
+        "sort": "odds",
+        "compress": 0,           # 圧縮 OFF（ZLIB+Base64展開を回避）
+        "input": "UTF-8",
+        "output": "jsonp",
+        "callback": callback_name,
+        "_": int(_time.time() * 1000),  # キャッシュバスタ
     }
     headers = {
         "User-Agent": USER_AGENT,
         "Referer": f"https://race.netkeiba.com/odds/index.html?race_id={race_id}",
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With": "XMLHttpRequest",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
 
-    try:
-        resp = requests.get(ODDS_API_URL, params=params, headers=headers, timeout=20)
-        if resp.status_code != 200:
-            return None
-        # JSONP形式の場合は剥がす
-        text = resp.text.strip()
-        m = re.match(r"^[\w\$]+\((.*)\)\s*;?\s*$", text, re.DOTALL)
-        if m:
-            text = m.group(1)
-        return json.loads(text)
-    except Exception as e:
-        print(f"odds fetch error: {e}")
-        return None
+    # 最初に action=update（実オッズ）を試し、失敗したら action=init にフォールバック
+    for action in ["update", "init"]:
+        params = {**base_params, "action": action}
+        try:
+            resp = requests.get(ODDS_API_URL, params=params, headers=headers, timeout=20)
+            if resp.status_code != 200:
+                continue
+            text = resp.text.strip()
+            # JSONP wrapper を剥がす
+            m = re.match(r"^[\w\$]+\((.*)\)\s*;?\s*$", text, re.DOTALL)
+            if m:
+                text = m.group(1)
+            data = json.loads(text)
+            # update が "result odds empty" を返した場合は init にフォールバック
+            if (
+                isinstance(data, dict)
+                and data.get("data") in ("", None)
+                and action == "update"
+            ):
+                continue
+            return data
+        except Exception as e:
+            print(f"odds fetch error (action={action}): {e}")
+            continue
+    return None
 
 
 def _normalize_odds_key(raw_key: str) -> str:
@@ -122,12 +157,17 @@ def fetch_all_odds(race_id: str) -> dict:
         "umatan": {},
         "sanrenpuku": {},
         "sanrentan": {},
+        "official_datetime": None,  # netkeiba 側のオッズ更新時刻（API応答内）
     }
 
     # 単勝・複勝（type=1で両方取れる）
     data = _fetch_odds_json(race_id, 1)
     if data and "data" in data:
         odds = data["data"].get("odds", {})
+        # API応答の official_datetime を保存（取得時刻と区別するため）
+        official_dt = data["data"].get("official_datetime") or data["data"].get("OfficialDatetime")
+        if official_dt:
+            result["official_datetime"] = str(official_dt)
         # 単勝
         tansho_raw = odds.get("1", {})
         for k, v in tansho_raw.items():

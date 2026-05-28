@@ -145,9 +145,12 @@ def _load_course_style_stats(conn) -> dict:
     df["ratio"] = df["pass_1"] / df["head_count"]
 
     def classify(r):
-        if r <= 0.15: return 1
-        if r <= 0.40: return 2
-        if r <= 0.70: return 3
+        if r <= 0.15:
+            return 1
+        if r <= 0.40:
+            return 2
+        if r <= 0.70:
+            return 3
         return 4
     df["style"] = df["ratio"].apply(classify)
 
@@ -386,6 +389,60 @@ def build_prediction_features(
 
     # v4: 交互作用特徴量
     df = _add_interaction_features(df)
+
+    # v8: 展開シナジー特徴量（レース全体の脚質構成 × 自分の脚質）
+    df = _add_pace_synergy_features(df)
+
+    return df
+
+
+def _add_pace_synergy_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    v8: レース全体の脚質構成 × 自分の脚質 の交互作用特徴量。
+
+    build_features.py の add_pace_synergy_features() と同じロジックを
+    予測時 (1レース = 1 DataFrame) に適用する。
+    """
+    df = df.copy()
+
+    if "horse_main_style" not in df.columns:
+        for c in [
+            "race_n_nigema", "race_n_senko", "race_n_sashi", "race_n_oikomi",
+            "race_pace_pressure", "race_avg_main_style",
+            "is_lone_nigema",
+            "pace_pressure_x_self_nige", "pace_pressure_x_self_senko",
+            "pace_pressure_x_self_oikomi",
+            "n_nigema_x_self_nige",
+        ]:
+            df[c] = np.nan
+        return df
+
+    main = df["horse_main_style"]
+
+    # レース内の主脚質別頭数（このDFは1レース分なので race_id でgroupby不要）
+    df["race_n_nigema"] = float((main == 1).sum())
+    df["race_n_senko"] = float((main == 2).sum())
+    df["race_n_sashi"] = float((main == 3).sum())
+    df["race_n_oikomi"] = float((main == 4).sum())
+
+    nige_rate = df.get("horse_style_nige_rate", pd.Series(np.nan, index=df.index)).fillna(0)
+    senko_rate = df.get("horse_style_senko_rate", pd.Series(np.nan, index=df.index)).fillna(0)
+    oikomi_rate = df.get("horse_style_oikomi_rate", pd.Series(np.nan, index=df.index)).fillna(0)
+
+    pressure = (nige_rate + senko_rate).mean()
+    df["race_pace_pressure"] = float(pressure) if pd.notna(pressure) else 0.0
+
+    avg_main = main.mean()
+    df["race_avg_main_style"] = float(avg_main) if pd.notna(avg_main) else np.nan
+
+    df["is_lone_nigema"] = ((main == 1) & (df["race_n_nigema"] <= 1)).astype(float)
+
+    pace = df["race_pace_pressure"]
+    df["pace_pressure_x_self_nige"] = pace * nige_rate
+    df["pace_pressure_x_self_senko"] = pace * senko_rate
+    df["pace_pressure_x_self_oikomi"] = pace * oikomi_rate
+
+    df["n_nigema_x_self_nige"] = df["race_n_nigema"] * nige_rate
 
     return df
 

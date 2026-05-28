@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 
 from src.features.build_features import build_all_features
-from src.betting.probability import compute_strengths, wide_prob
 
 # JRA 単勝の控除率
 TAKEOUT = 0.20
@@ -111,7 +110,7 @@ def main():
             })
 
     out = pd.DataFrame(records)
-    print(f"[3/3] 集計...")
+    print("[3/3] 集計...")
 
     # オッズ帯別の比較
     out["odds_bin"] = pd.cut(

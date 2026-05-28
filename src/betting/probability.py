@@ -5,7 +5,7 @@ Plackett-Luce モデルを用いて、各馬の "強さ" を3着内確率から�
 """
 
 from itertools import combinations, permutations
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 

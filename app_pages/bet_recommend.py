@@ -101,7 +101,7 @@ def _render_sanrenpuku_summary(df: pd.DataFrame):
         })
 
     st.subheader("📋 推奨レース一覧")
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
     total_invest = len(recommended) * 100
     expected_return = total_invest * (SANRENPUKU_ROI / 100.0)
@@ -189,6 +189,75 @@ def _render_ev_mode(df: pd.DataFrame):
         key="bet_max_per_type",
     )
 
+    # オッズ帯フィルタ（v6/v8 診断で発見した「単勝の本命過熱帯と鬼門帯はマイナスEV」事実に基づく）
+    # 重要: このフィルタは **単勝・複勝のみ** に適用される（馬連/三連複等の組合せ券種は対象外）
+    # 理由: 既存の 3連複BOX 戦略 (ROI 102.4%) は「1番人気を Top3 軸として使う」のが必須条件のため、
+    #       <5倍 の本命を組合せ券種から除外すると勝ち筋を壊してしまう。
+    #
+    # プリセット定義 (各値は許容オッズ帯のリスト [(min1, max1), (min2, max2), ...])
+    # None はカスタム入力モードを意味する
+    ODDS_PRESETS = {
+        "🍞 v8 サンドイッチ 15-20+40-50 (推奨・最高ROI)": [(15.0, 20.0), (40.0, 50.0)],
+        "🚫 30-40倍除外モード 10-30+40-50": [(10.0, 30.0), (40.0, 50.0)],
+        "📐 中穴帯 10-50倍 (旧デフォルト)": [(10.0, 50.0)],
+        "🎯 高ROI単勝 40-50倍のみ (edge≥0.10で128.9%)": [(40.0, 50.0)],
+        "🛡️ 安定運用 15-20倍のみ (edge≥0.10で104.1%)": [(15.0, 20.0)],
+        "⚙️ カスタム (min/max 入力)": None,
+        "❌ フィルタOFF (全馬対象)": [],
+    }
+
+    with st.expander("💎 オッズ帯フィルタ（単勝・複勝のみに適用）", expanded=True):
+        st.caption(
+            "**v8 モデル診断結果 (オッズ帯細分)**: 単勝ROI は  \n"
+            "〜5倍: 49〜61% ⛔ / 5-10倍: 70〜80% / **10-30倍: 90〜130% 🟢** / "
+            "**30-40倍: 43〜69% ⛔鬼門** / **40-50倍: 128.9% 🟢🟢** / 50倍超: 大穴。  \n"
+            "**v8 サンドイッチ (15-20 + 40-50)** が最高ROI、**鬼門の30-40倍を避ける**のが核心。  \n"
+            "🔍 **馬連 / ワイド / 馬単 / 三連複 / 三連単 は本フィルタの対象外** "
+            "（軸として本命を使う組合せ戦略を維持するため）。"
+        )
+        preset_label = st.selectbox(
+            "プリセット",
+            list(ODDS_PRESETS.keys()),
+            index=0,
+            key="bet_odds_preset",
+            help="v8 診断結果に基づく事前定義された帯セット。「カスタム」で min/max を直接入力可能。",
+        )
+        preset_bands = ODDS_PRESETS[preset_label]
+        is_custom = preset_bands is None
+        is_off = preset_bands == []
+
+        col_o1, col_o2 = st.columns(2)
+        with col_o1:
+            min_horse_odds = st.number_input(
+                "単勝オッズ 最小 (カスタム時)",
+                min_value=1.0,
+                max_value=50.0,
+                value=10.0,
+                step=1.0,
+                key="bet_min_horse_odds",
+                disabled=not is_custom,
+                help="プリセット=カスタム のときのみ使用",
+            )
+        with col_o2:
+            max_horse_odds = st.number_input(
+                "単勝オッズ 最大 (カスタム時)",
+                min_value=10.0,
+                max_value=999.0,
+                value=50.0,
+                step=5.0,
+                key="bet_max_horse_odds",
+                disabled=not is_custom,
+                help="プリセット=カスタム のときのみ使用",
+            )
+
+        # 最終的な許容バンドリストを決定
+        if is_off:
+            allowed_bands: list[tuple[float, float]] | None = None  # フィルタなし
+        elif is_custom:
+            allowed_bands = [(float(min_horse_odds), float(max_horse_odds))]
+        else:
+            allowed_bands = preset_bands
+
     # 的中率優先フィルター
     with st.expander("🎯 的中率優先フィルター（詳細設定）"):
         st.caption("AIの予測確率が高い馬だけに絞ることで、的中率を優先できます。回収率は下がる場合があります。")
@@ -218,6 +287,8 @@ def _render_ev_mode(df: pd.DataFrame):
             selected_race_id, race_df, budget, ev_threshold,
             bet_types, max_per_type, strategy,
             min_pred_prob=min_pred_prob if use_prob_filter else None,
+            allowed_odds_bands=allowed_bands,
+            preset_label=preset_label,
         )
 
     # ── 既存の計算結果があれば表示 ──
@@ -239,6 +310,8 @@ def _calculate_and_display(
     max_per_type: int,
     strategy: str,
     min_pred_prob: float | None = None,
+    allowed_odds_bands: list[tuple[float, float]] | None = None,
+    preset_label: str = "",
 ):
     """オッズ取得 → EV計算 → 予算配分 → 表示"""
 
@@ -283,6 +356,81 @@ def _calculate_and_display(
 
     if len(all_bets_df) == 0:
         st.warning("計算対象の買い目がありませんでした。")
+        return
+
+    # 3.5) オッズ帯フィルタ — 単勝・複勝のみに適用
+    # 馬連/ワイド/馬単/三連複/三連単 は組合せの軸として本命を使う戦略を維持するため対象外
+    if allowed_odds_bands is not None and len(allowed_odds_bands) > 0:
+        tansho = odds.get("tansho", {}) if isinstance(odds, dict) else {}
+        if not tansho:
+            st.warning("⚠️ 単勝オッズが取得できなかったため、オッズ帯フィルタはスキップされました。")
+        else:
+            EXCLUSIVE_BET_TYPES = {"単勝", "複勝"}
+
+            def _in_any_band(o: float) -> bool:
+                return any(lo <= o <= hi for lo, hi in allowed_odds_bands)
+
+            def _horse_in_range(row) -> bool:
+                if row["type"] not in EXCLUSIVE_BET_TYPES:
+                    return True  # 組合せ券種はフィルタ対象外
+                horses = row.get("horses")
+                if not horses:
+                    return True
+                horse_no = horses[0]
+                horse_odds = tansho.get(str(int(horse_no)))
+                if horse_odds is None:
+                    return True  # オッズ不明はフィルタしない
+                try:
+                    o = float(horse_odds)
+                except (TypeError, ValueError):
+                    return True
+                return _in_any_band(o)
+
+            before_n = len(all_bets_df)
+            mask = all_bets_df.apply(_horse_in_range, axis=1)
+            excluded_df = all_bets_df[~mask]
+            all_bets_df = all_bets_df[mask].reset_index(drop=True)
+
+            # 除外内訳（単勝・複勝のみ）を分類
+            removed_low = []     # 本命過熱帯 (5倍未満)
+            removed_kimon = []   # 鬼門帯 (30-40倍)
+            removed_high = []    # 大穴帯 (50倍超)
+            removed_gap = []     # その他のバンド外
+            for _, row in excluded_df.iterrows():
+                horse_no = int(row["horses"][0])
+                o = float(tansho.get(str(horse_no), 0))
+                tag = f"{row['type']} {horse_no}番({o:.1f})"
+                if o < 5.0:
+                    removed_low.append(tag)
+                elif 30.0 <= o < 40.0:
+                    removed_kimon.append(tag)
+                elif o > 50.0:
+                    removed_high.append(tag)
+                else:
+                    removed_gap.append(tag)
+
+            band_str = " or ".join(f"{lo:.0f}-{hi:.0f}倍" for lo, hi in allowed_odds_bands)
+            msgs = [
+                f"💎 オッズ帯フィルタ [{preset_label}]: 許容帯 {band_str}",
+                f"  単勝・複勝候補: {before_n}件 → {len(all_bets_df)}件",
+            ]
+            if removed_low:
+                msgs.append(f"⛔ 本命過熱帯<5倍で除外: {', '.join(removed_low[:6])}"
+                            + (f" 他{len(removed_low) - 6}件" if len(removed_low) > 6 else ""))
+            if removed_kimon:
+                msgs.append(f"⛔ 鬼門帯30-40倍で除外: {', '.join(removed_kimon[:6])}"
+                            + (f" 他{len(removed_kimon) - 6}件" if len(removed_kimon) > 6 else ""))
+            if removed_high:
+                msgs.append(f"🌪️ 大穴帯>50倍で除外: {', '.join(removed_high[:6])}"
+                            + (f" 他{len(removed_high) - 6}件" if len(removed_high) > 6 else ""))
+            if removed_gap:
+                msgs.append(f"➖ バンド外で除外: {', '.join(removed_gap[:6])}"
+                            + (f" 他{len(removed_gap) - 6}件" if len(removed_gap) > 6 else ""))
+            msgs.append("✅ 馬連 / ワイド / 馬単 / 三連複 / 三連単 は全馬を構成員として残しています")
+            st.info("  \n".join(msgs))
+
+    if len(all_bets_df) == 0:
+        st.warning("オッズ帯フィルタで全候補が除外されました。フィルタを緩めるか OFF にしてください。")
         return
 
     # 4) 予算配分
@@ -342,7 +490,7 @@ def _display_bet_results(results: dict, budget: int):
 
     if len(allocated) == 0:
         st.warning(
-            f"⚠️ EV閾値以上の買い目が予算内に見つかりませんでした。\n\n"
+            "⚠️ EV閾値以上の買い目が予算内に見つかりませんでした。\n\n"
             "EV閾値を下げるか、対象券種を増やしてみてください。"
         )
     else:
@@ -430,7 +578,7 @@ def _display_bet_results(results: dict, budget: int):
             disp[["type", "買い目", "AI確率", "オッズ", "期待値", "購入", "期待払戻"]].rename(
                 columns={"type": "券種"}
             ),
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
         )
         if has_exclusive and excl_has_multiple:
@@ -470,7 +618,7 @@ def _display_bet_results(results: dict, budget: int):
         filtered[["評価", "type", "買い目", "AI確率", "オッズ", "期待値"]].rename(
             columns={"type": "券種"}
         ),
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
     )
 

@@ -6,7 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 
 from src.features.build_features import build_all_features
-from src.model.train import load_model, FEATURE_COLUMNS, get_available_features, prepare_dataset
+from src.model.train import load_model, get_available_features, prepare_dataset
 
 
 @st.cache_data(ttl=3600, show_spinner="特徴量を構築中...")
@@ -25,7 +25,7 @@ def render():
     # ── 設定 ──
     col1, col2 = st.columns(2)
     with col1:
-        model_name = st.selectbox("モデル", ["lightgbm_v6", "lightgbm_v7", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], help="v6 推奨")
+        model_name = st.selectbox("モデル", ["lightgbm_v8", "lightgbm_v6", "lightgbm_v7", "lightgbm_v5", "lightgbm_v4", "lightgbm_v3", "lightgbm_v2", "lightgbm_v1"], help="v8 推奨 (展開シナジー特徴量で v6 を全項目上回り)")
         strategy = st.selectbox("戦略", ["バリューベット（エッジ）", "期待値（EV）"])
 
     with col2:
@@ -129,7 +129,7 @@ def _run_backtest(model_name, strategy, thresholds, min_odds, max_odds):
     display_df = result_df.copy()
     display_df["的中率"] = display_df["的中率"].apply(lambda x: f"{x:.1f}%")
     display_df["回収率"] = display_df["回収率"].apply(lambda x: f"{x:.1f}%")
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.dataframe(display_df, width='stretch', hide_index=True)
 
     # ── 回収率グラフ ──
     st.subheader("📈 閾値 vs 回収率")
@@ -149,7 +149,7 @@ def _run_backtest(model_name, strategy, thresholds, min_odds, max_odds):
         yaxis_title="回収率 (%)",
         height=400,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     # ── 賭け数グラフ ──
     st.subheader("📉 閾値 vs 賭け数")
@@ -166,7 +166,7 @@ def _run_backtest(model_name, strategy, thresholds, min_odds, max_odds):
         yaxis_title="賭け数",
         height=350,
     )
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width='stretch')
 
     # ── 月別回収率（最良閾値） ──
     best_th = result_df.loc[result_df["回収率"].idxmax(), "閾値"]
@@ -196,4 +196,4 @@ def _run_backtest(model_name, strategy, thresholds, min_odds, max_odds):
     )
     fig3.add_hline(y=100, line_dash="dash", line_color="gray")
     fig3.update_layout(xaxis_title="月", yaxis_title="回収率 (%)", height=350)
-    st.plotly_chart(fig3, use_container_width=True)
+    st.plotly_chart(fig3, width='stretch')

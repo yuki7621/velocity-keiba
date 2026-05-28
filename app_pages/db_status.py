@@ -46,7 +46,7 @@ def render():
         "SELECT venue, COUNT(*) as count FROM races WHERE venue IS NOT NULL GROUP BY venue ORDER BY count DESC",
         conn,
     )
-    st.dataframe(venue_counts, use_container_width=True)
+    st.dataframe(venue_counts, width='stretch')
 
     # 最新データ
     st.subheader("直近のレース（最新10件）")
@@ -54,6 +54,6 @@ def render():
         "SELECT date, venue, title, surface, distance, condition FROM races ORDER BY date DESC LIMIT 10",
         conn,
     )
-    st.dataframe(recent, use_container_width=True)
+    st.dataframe(recent, width='stretch')
 
     conn.close()

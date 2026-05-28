@@ -2,7 +2,7 @@
 
 import pandas as pd
 import numpy as np
-from src.model.train import FEATURE_COLUMNS, TARGET_COLUMN, prepare_dataset, get_available_features
+from src.model.train import prepare_dataset, get_available_features
 
 
 def _realized_fukusho_payout(df: pd.DataFrame) -> pd.Series:

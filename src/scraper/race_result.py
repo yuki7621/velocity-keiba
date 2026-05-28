@@ -538,7 +538,7 @@ def _parse_payouts(soup: BeautifulSoup, race_id: str) -> list[dict]:
                     continue
 
                 # 単勝/複勝は horse_number を整数で保存、それ以外は None
-                first_horse = int(combo.split("-")[0]) if "-" not in combo else None
+                int(combo.split("-")[0]) if "-" not in combo else None
                 if bet_type in _SINGLE_HORSE_TYPES:
                     horse_number = int(combo.split("-")[0]) if combo.isdigit() else None
                 else:

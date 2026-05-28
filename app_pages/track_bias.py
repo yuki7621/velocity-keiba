@@ -4,13 +4,12 @@ import sqlite3
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import date, timedelta
+from datetime import date
 
 from config.settings import DB_PATH
 from src.features.track_bias import (
     get_race_day_results,
     analyze_track_bias,
-    get_previous_day,
 )
 
 
@@ -138,7 +137,7 @@ def _show_surface_bias(bias: dict, surface_df: pd.DataFrame, surface: str):
             textposition="auto",
         )
         fig.update_layout(yaxis_title="複勝率 (%)", height=300, margin=dict(t=10))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     with col_right:
         st.markdown("#### 🏃 脚質別複勝率")
@@ -151,7 +150,7 @@ def _show_surface_bias(bias: dict, surface_df: pd.DataFrame, surface: str):
             textposition="auto",
         )
         fig.update_layout(yaxis_title="複勝率 (%)", height=300, margin=dict(t=10))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     # ── レースごとの詳細 ──
     st.markdown("#### 📋 レース別結果")
@@ -181,6 +180,6 @@ def _show_surface_bias(bias: dict, surface_df: pd.DataFrame, surface: str):
 
     st.dataframe(
         race_summary[["レース", "距離", "頭数", "馬場状態", "勝ちタイム", "上がり3F平均"]],
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
     )

@@ -386,6 +386,97 @@ def add_running_style_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
+#  6c. 展開シナジー特徴量 (v8)
+# ============================================================
+# v7 の脚質特徴量は「自分の脚質」単体だったため、レース構成によっては
+# 逆効果になっていた（例: 逃げ馬が他にも多い → ハイペース → 共倒れ）。
+# v8 ではレース全体の脚質構成を把握し、自分の脚質との交互作用を取る。
+#
+# 重要: 各馬の horse_main_style / horse_style_*_rate は **過去成績ベース**で
+# 計算済み（add_running_style_features）なので、これらを使ってレース内集計
+# しても予測時にもリーク無く再現できる。
+
+def add_pace_synergy_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    レース全体の脚質構成 × 自分の脚質 の交互作用特徴量を作成する。
+
+    入力前提: horse_main_style / horse_style_{nige,senko,sashi,oikomi}_rate が
+              既に計算済みであること（add_running_style_features の後に呼ぶ）。
+    """
+    df = df.copy()
+
+    # ── レース内集計の準備（NaN の馬は集計対象から除外） ──
+    main_style = df.get("horse_main_style")
+    if main_style is None:
+        # 脚質特徴量が無ければスキップ
+        for c in [
+            "race_n_nigema", "race_n_senko", "race_n_sashi", "race_n_oikomi",
+            "race_pace_pressure", "race_avg_main_style",
+            "is_lone_nigema",
+            "pace_pressure_x_self_nige", "pace_pressure_x_self_senko",
+            "pace_pressure_x_self_oikomi",
+            "n_nigema_x_self_nige",
+        ]:
+            df[c] = np.nan
+        return df
+
+    # 主脚質ごとの馬数（NaN は数えない）
+    is_nige = (main_style == 1).astype(float)
+    is_senko = (main_style == 2).astype(float)
+    is_sashi = (main_style == 3).astype(float)
+    is_oikomi = (main_style == 4).astype(float)
+
+    df["_is_nige"] = is_nige
+    df["_is_senko"] = is_senko
+    df["_is_sashi"] = is_sashi
+    df["_is_oikomi"] = is_oikomi
+
+    grp = df.groupby("race_id")
+
+    # レース内の主脚質別頭数
+    df["race_n_nigema"] = grp["_is_nige"].transform("sum")
+    df["race_n_senko"] = grp["_is_senko"].transform("sum")
+    df["race_n_sashi"] = grp["_is_sashi"].transform("sum")
+    df["race_n_oikomi"] = grp["_is_oikomi"].transform("sum")
+
+    # ペースプレッシャー = レース内の (逃げ率 + 先行率) の平均
+    nige_rate = df.get("horse_style_nige_rate", pd.Series(np.nan, index=df.index))
+    senko_rate = df.get("horse_style_senko_rate", pd.Series(np.nan, index=df.index))
+    pressure_per_horse = nige_rate.fillna(0) + senko_rate.fillna(0)
+    df["_pressure_horse"] = pressure_per_horse
+    df["race_pace_pressure"] = grp["_pressure_horse"].transform("mean")
+
+    # レース内主脚質の平均（小さい=前傾型、大きい=後傾型のレース）
+    df["race_avg_main_style"] = grp["horse_main_style"].transform("mean")
+
+    # ── 交互作用特徴量 ──
+    # 1) 唯一の逃げ馬（楽逃げボーナス候補）
+    df["is_lone_nigema"] = (
+        (df["horse_main_style"] == 1) & (df["race_n_nigema"] <= 1)
+    ).astype(float)
+
+    # 2) ハイペース × 自分の脚質: 逃げ・先行は不利、追込は有利
+    pace = df["race_pace_pressure"].fillna(0)
+    df["pace_pressure_x_self_nige"] = pace * nige_rate.fillna(0)
+    df["pace_pressure_x_self_senko"] = pace * senko_rate.fillna(0)
+    df["pace_pressure_x_self_oikomi"] = pace * df.get(
+        "horse_style_oikomi_rate", pd.Series(0, index=df.index)
+    ).fillna(0)
+
+    # 3) 逃げ馬多 × 自分も逃げ = 共倒れ確定リスク
+    df["n_nigema_x_self_nige"] = df["race_n_nigema"] * nige_rate.fillna(0)
+
+    # 後片付け
+    df.drop(
+        columns=["_is_nige", "_is_senko", "_is_sashi", "_is_oikomi", "_pressure_horse"],
+        inplace=True,
+        errors="ignore",
+    )
+
+    return df
+
+
+# ============================================================
 #  7. 騎手の特徴量（ベクトル化版）
 # ============================================================
 
@@ -668,6 +759,9 @@ def build_all_features(db_path=DB_PATH) -> pd.DataFrame:
 
     _step("[7/13] 脚質・コース×脚質適性を計算中 (v7)...")
     df = add_running_style_features(df)
+
+    _step("[7b/13] 展開シナジー特徴量を作成中 (v8)...")
+    df = add_pace_synergy_features(df)
 
     _step("[8/13] 騎手の特徴量を作成中...")
     df = add_jockey_features(df)

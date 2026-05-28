@@ -5,10 +5,8 @@ AI予測確率から上位N頭を選び、固定戦略で購入した場合のRO
 """
 
 import sqlite3
-from itertools import combinations, permutations
-from typing import Callable
+from itertools import combinations
 
-import numpy as np
 import pandas as pd
 
 from config.settings import DB_PATH

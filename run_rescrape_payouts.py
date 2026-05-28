@@ -16,7 +16,6 @@ import argparse
 import sqlite3
 import sys
 import time
-from pathlib import Path
 
 from config.settings import DB_PATH, SCRAPE_INTERVAL_SEC
 from src.scraper.race_result import scrape_race

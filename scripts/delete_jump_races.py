@@ -93,7 +93,7 @@ def main():
     before_payouts = conn.execute("SELECT COUNT(*) FROM payouts").fetchone()[0]
 
     counts = count_affected_rows(conn)
-    print(f"削除対象:")
+    print("削除対象:")
     print(f"  races:    {counts['races']:,} レース")
     print(f"  results:  {counts['results']:,} 行")
     print(f"  payouts:  {counts['payouts']:,} 行")

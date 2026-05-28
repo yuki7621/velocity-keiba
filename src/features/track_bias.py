@@ -12,7 +12,7 @@
 """
 
 import sqlite3
-from datetime import date, timedelta
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -153,8 +153,8 @@ def analyze_track_bias(df: pd.DataFrame, surface: str = None) -> dict:
     # 先行馬 = 1コーナー通過が頭数の1/3以内
     df["is_front"] = df["first_pass"] <= (df["head_count"] / 3)
 
-    front = df[df["is_front"] == True]
-    closer = df[df["is_front"] == False]
+    front = df[df["is_front"]]
+    closer = df[~df["is_front"]]
 
     front_top3 = front["is_top3"].mean() if len(front) > 0 else 0.0
     closer_top3 = closer["is_top3"].mean() if len(closer) > 0 else 0.0

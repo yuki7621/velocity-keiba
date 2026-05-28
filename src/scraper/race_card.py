@@ -6,10 +6,9 @@ race.netkeiba.com の出馬表ページから、レース開始前に
 """
 
 import re
-import time
 import requests
 from bs4 import BeautifulSoup
-from config.settings import USER_AGENT, SCRAPE_INTERVAL_SEC
+from config.settings import USER_AGENT
 
 # 出馬表のベースURL（db.netkeiba.com ではなく race.netkeiba.com）
 SHUTUBA_BASE_URL = "https://race.netkeiba.com"
@@ -65,6 +64,10 @@ def _parse_race_info_card(soup: BeautifulSoup, race_id: str) -> dict | None:
     race_data = soup.select_one(".RaceData01")
     if race_data:
         text = race_data.get_text(strip=True)
+        # 発走時刻（例: "12:25発走" や "12:25" 単体）
+        m = re.search(r"(\d{1,2}):(\d{2})\s*発走?", text)
+        if m:
+            info["start_time"] = f"{int(m.group(1)):02d}:{m.group(2)}"
         # 芝/ダート（出馬表では「ダ1800m」のように略記されることがある）
         if "芝" in text:
             info["surface"] = "芝"

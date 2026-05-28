@@ -6,7 +6,6 @@
 
 import numpy as np
 import pandas as pd
-from itertools import combinations
 
 from config.settings import DB_PATH
 from src.features.build_features import build_all_features
@@ -30,7 +29,7 @@ def build_race_level_df(model_name="lightgbm_v6", test_frac=0.2):
     print(f"[2/3] 払戻読込 ({len(race_ids)} races)...")
     payouts_map = _load_combo_payouts(race_ids, "sanrenpuku", DB_PATH)
 
-    print(f"[3/3] レース単位集計...")
+    print("[3/3] レース単位集計...")
     rows = []
     for race_id, g in test_df.groupby("race_id"):
         if len(g) < 3:
