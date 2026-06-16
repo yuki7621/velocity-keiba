@@ -19,19 +19,29 @@ from src.features.track_bias import get_track_bias_for_date
 # finish_time_sec の平均と標準偏差を事前計算してメモリに保持する。
 # build_features.py は expanding (累積) で計算するが、予測時は直近の
 # 特徴量を求めるだけなので、全期間平均で十分な近似となる。
-_speed_ref_cache: dict | None = None
+# target_date 文字列ごとにキャッシュ（B-lite: 対象日以前のみで基準値を計算）
+_speed_ref_cache: dict[str, dict] = {}
 
 
-def _load_speed_reference(conn) -> dict:
+def _load_speed_reference(conn, target_date: str | None = None) -> dict:
     """
     (surface, distance, condition) → {base_time, base_std} の辞書を返す。
-    初回のみDBから計算してキャッシュする。
-    """
-    global _speed_ref_cache
-    if _speed_ref_cache is not None:
-        return _speed_ref_cache
 
-    query = """
+    B-lite 改修: build_features.py は「対象レース以前」の累積平均/標準偏差を使うため、
+    全期間平均だと将来データが混ざり予測がレビューと乖離する。target_date を渡すと
+    その日より前のレースのみで基準値を計算し、レビュー値に近づける（リーク防止も兼ねる）。
+    """
+    cache_key = str(target_date) if target_date else "__all__"
+    if cache_key in _speed_ref_cache:
+        return _speed_ref_cache[cache_key]
+
+    params: list = []
+    date_filter = ""
+    if target_date:
+        date_filter = "AND rc.date < ?"
+        params.append(str(target_date))
+
+    query = f"""
         SELECT rc.surface, rc.distance, rc.condition,
                r.finish_time_sec
         FROM results r
@@ -39,15 +49,16 @@ def _load_speed_reference(conn) -> dict:
         WHERE r.finish_time_sec IS NOT NULL
           AND r.finish_time_sec > 0
           AND r.finish_position > 0
+          {date_filter}
           AND (rc.distance % 100 = 0 OR rc.distance = 1150)
           AND rc.title NOT LIKE '%障害%'
           AND rc.title NOT LIKE '%ジャンプ%'
           AND rc.surface != '障害'
     """
-    df = pd.read_sql_query(query, conn)
+    df = pd.read_sql_query(query, conn, params=params)
     if len(df) == 0:
-        _speed_ref_cache = {}
-        return _speed_ref_cache
+        _speed_ref_cache[cache_key] = {}
+        return _speed_ref_cache[cache_key]
 
     df["condition"] = df["condition"].fillna("")
     df["_key"] = df["surface"] + "_" + df["distance"].astype(str) + "_" + df["condition"]
@@ -55,11 +66,11 @@ def _load_speed_reference(conn) -> dict:
     grouped = df.groupby("_key")["finish_time_sec"].agg(["mean", "std", "count"])
     grouped = grouped[grouped["count"] >= 10]  # build_features と揃える
 
-    _speed_ref_cache = {
+    _speed_ref_cache[cache_key] = {
         k: {"base_time": row["mean"], "base_std": row["std"]}
         for k, row in grouped.iterrows()
     }
-    return _speed_ref_cache
+    return _speed_ref_cache[cache_key]
 
 
 def _compute_speed_index(finish_time_sec: float, surface: str, distance: int,
@@ -83,17 +94,17 @@ def _compute_speed_index(finish_time_sec: float, surface: str, distance: int,
 
 
 def clear_speed_reference_cache():
-    """キャッシュをクリアする（テスト用）"""
+    """参照統計キャッシュをクリアする（データ更新後・テスト用）"""
     global _speed_ref_cache, _pedigree_stats_cache, _course_style_cache
-    _speed_ref_cache = None
-    _pedigree_stats_cache = None
-    _course_style_cache = None
+    _speed_ref_cache = {}
+    _pedigree_stats_cache = {}
+    _course_style_cache = {}
 
 
 # ============================================================
-# コース×脚質のtop3率キャッシュ (v7)
+# コース×脚質のtop3率キャッシュ (v7) — target_date ごとにキャッシュ
 # ============================================================
-_course_style_cache: dict | None = None
+_course_style_cache: dict[str, dict] = {}
 
 
 def _dist_cat_label(distance: int) -> str:
@@ -106,18 +117,32 @@ def _dist_cat_label(distance: int) -> str:
     return "long"
 
 
-def _load_course_style_stats(conn) -> dict:
-    """コース × 距離カテゴリ × 脚質 → top3 率 を集計してキャッシュ"""
-    global _course_style_cache
-    if _course_style_cache is not None:
-        return _course_style_cache
+def _load_course_style_stats(conn, target_date: str | None = None) -> dict:
+    """コース × 距離カテゴリ × 脚質 → top3 率 を集計してキャッシュ
 
-    query = """
+    B-lite: target_date を渡すとその日より前のレースのみで集計（レビューと整合・リーク防止）。
+    """
+    cache_key = str(target_date) if target_date else "__all__"
+    if cache_key in _course_style_cache:
+        return _course_style_cache[cache_key]
+
+    params: list = []
+    date_filter = ""
+    if target_date:
+        date_filter = "AND rc.date < ?"
+        params.append(str(target_date))
+
+    query = f"""
         SELECT rc.venue, rc.surface, rc.distance,
-               r.finish_position, r.passing_order, rc.head_count
+               r.finish_position, r.passing_order,
+               -- head_count は NULL 期間があるため出走頭数で補完 (build_features と整合)
+               COALESCE(rc.head_count,
+                        (SELECT COUNT(*) FROM results rr WHERE rr.race_id = r.race_id)
+               ) AS head_count
         FROM results r
         JOIN races rc ON r.race_id = rc.race_id
         WHERE r.finish_position > 0
+          {date_filter}
           AND (rc.distance % 100 = 0 OR rc.distance = 1150)
           AND rc.title NOT LIKE '%障害%'
           AND rc.title NOT LIKE '%ジャンプ%'
@@ -126,12 +151,11 @@ def _load_course_style_stats(conn) -> dict:
           ))
           AND rc.surface != '障害'
           AND r.passing_order IS NOT NULL
-          AND rc.head_count > 0
     """
-    df = pd.read_sql_query(query, conn)
+    df = pd.read_sql_query(query, conn, params=params)
     if len(df) == 0:
-        _course_style_cache = {}
-        return _course_style_cache
+        _course_style_cache[cache_key] = {}
+        return _course_style_cache[cache_key]
 
     # 脚質分類
     def first_pos(s):
@@ -162,33 +186,38 @@ def _load_course_style_stats(conn) -> dict:
         if len(grp) >= 20:
             cache[(venue, surf, dc, int(style))] = float(grp["is_top3"].mean())
 
-    _course_style_cache = cache
+    _course_style_cache[cache_key] = cache
     return cache
 
 
 # ============================================================
-# 血統統計のキャッシュ
+# 血統統計のキャッシュ — target_date ごとにキャッシュ
 # ============================================================
 # build_features.py の add_pedigree_features() と整合する集計を
-# DB全体から事前計算してキャッシュする。
-# 予測時は target_date より前の結果だけを使うのが厳密だが、
-# 将来レース予測が主用途なので全期間集計でほぼ等価。
-_pedigree_stats_cache: dict | None = None
+# 対象日以前のデータから計算する（B-lite: 全期間→対象日以前でレビューと整合）。
+_pedigree_stats_cache: dict[str, dict] = {}
 
 
-def _load_pedigree_stats(conn) -> dict:
-    """種牡馬・母父の成績集計を返す（初回のみDBから計算してキャッシュ）"""
-    global _pedigree_stats_cache
-    if _pedigree_stats_cache is not None:
-        return _pedigree_stats_cache
+def _load_pedigree_stats(conn, target_date: str | None = None) -> dict:
+    """種牡馬・母父の成績集計を返す（target_date 以前で集計してキャッシュ）"""
+    cache_key = str(target_date) if target_date else "__all__"
+    if cache_key in _pedigree_stats_cache:
+        return _pedigree_stats_cache[cache_key]
 
-    query = """
+    params: list = []
+    date_filter = ""
+    if target_date:
+        date_filter = "AND rc.date < ?"
+        params.append(str(target_date))
+
+    query = f"""
         SELECT h.sire, h.dam_sire, rc.surface, rc.distance,
                r.finish_position
         FROM results r
         JOIN races rc ON r.race_id = rc.race_id
         LEFT JOIN horses h ON r.horse_id = h.horse_id
         WHERE r.finish_position > 0
+          {date_filter}
           AND (rc.distance % 100 = 0 OR rc.distance = 1150)
           AND rc.title NOT LIKE '%障害%'
           AND rc.title NOT LIKE '%ジャンプ%'
@@ -197,13 +226,13 @@ def _load_pedigree_stats(conn) -> dict:
           ))
           AND rc.surface != '障害'
     """
-    df = pd.read_sql_query(query, conn)
+    df = pd.read_sql_query(query, conn, params=params)
     if len(df) == 0:
-        _pedigree_stats_cache = {
+        _pedigree_stats_cache[cache_key] = {
             "sire_overall": {}, "sire_surface": {}, "sire_distcat": {},
             "dam_sire_overall": {}, "dam_sire_surface": {},
         }
-        return _pedigree_stats_cache
+        return _pedigree_stats_cache[cache_key]
 
     df["is_top3"] = (df["finish_position"] <= 3).astype(float)
     df["distcat"] = (df["distance"] <= 1800).astype(int)
@@ -235,7 +264,7 @@ def _load_pedigree_stats(conn) -> dict:
         if len(grp) >= 20:
             cache["dam_sire_surface"][(name, surf)] = float(grp["is_top3"].mean())
 
-    _pedigree_stats_cache = cache
+    _pedigree_stats_cache[cache_key] = cache
     return cache
 
 
@@ -258,7 +287,7 @@ def _get_horse_pedigree(conn, horse_id: str) -> tuple[str | None, str | None]:
 def _get_pedigree_features(conn, horse_id: str, race_info: dict) -> dict:
     """血統特徴量を計算する"""
     sire, dam_sire = _get_horse_pedigree(conn, horse_id)
-    stats = _load_pedigree_stats(conn)
+    stats = _load_pedigree_stats(conn, target_date=race_info.get("date"))
 
     surface = race_info.get("surface", "")
     distance = race_info.get("distance", 0) or 0
@@ -362,7 +391,7 @@ def build_prediction_features(
         rows.append(row)
 
     # v7: コース × 主脚質 の適性を各馬に付与
-    course_style_stats = _load_course_style_stats(conn)
+    course_style_stats = _load_course_style_stats(conn, target_date=race_info.get("date"))
     venue = race_info.get("venue", "")
     surf = race_info.get("surface", "")
     dist_cat = _dist_cat_label(race_info.get("distance", 0) or 0)
@@ -509,7 +538,11 @@ def _get_horse_features(conn, horse_id: str, race_info: dict, n_races: int = 5) 
         SELECT r.finish_position, r.finish_time_sec, r.last_3f,
                r.passing_order, r.prize, r.odds,
                rc.date, rc.distance, rc.surface, rc.venue, rc.condition,
-               rc.head_count
+               -- head_count は races テーブルが NULL の期間があるため、
+               -- build_features.py と同様に出走頭数(結果行数)で補完する
+               COALESCE(rc.head_count,
+                        (SELECT COUNT(*) FROM results rr WHERE rr.race_id = r.race_id)
+               ) AS head_count
         FROM results r
         JOIN races rc ON r.race_id = rc.race_id
         WHERE r.horse_id = ?
@@ -530,7 +563,8 @@ def _get_horse_features(conn, horse_id: str, race_info: dict, n_races: int = 5) 
         return _empty_horse_features(n_races)
 
     # build_features.py と同じ式でスピード指数を各過去レースで計算
-    speed_ref = _load_speed_reference(conn)
+    # 基準値は対象日以前のみで算出（B-lite: レビューと整合・リーク防止）
+    speed_ref = _load_speed_reference(conn, target_date=race_info.get("date"))
     past["speed_index"] = past.apply(
         lambda r: _compute_speed_index(
             r["finish_time_sec"], r["surface"], r["distance"],
@@ -571,7 +605,9 @@ def _get_horse_features(conn, horse_id: str, race_info: dict, n_races: int = 5) 
     features[f"horse_last3f_std_{n_races}"] = recent["last_3f"].std() if len(recent) >= 2 else np.nan
 
     # 賞金
-    features["horse_total_prize"] = past["prize"].sum()
+    # build_features.py は賞金が全て欠損のとき NaN を返すため、min_count=1 で揃える
+    # (旧実装の .sum() は全欠損時に 0 を返し、学習時分布とズレて予測が乖離していた)
+    features["horse_total_prize"] = past["prize"].sum(min_count=1)
     features["horse_avg_prize"] = past["prize"].mean()
 
     # 出走回数

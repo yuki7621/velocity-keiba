@@ -17,9 +17,16 @@ EXPORT_FILE = EXPORT_DIR / "keiba_export.tar.gz"
 
 FILES_TO_EXPORT = [
     "data/keiba.db",
-    "models/lightgbm_v1.pkl",
-    "models/lightgbm_v2.pkl",
+    # 現行モデル (v8 = 推奨 / v6 = フォールバック)
+    "models/lightgbm_v8.pkl",
+    "models/lightgbm_v6.pkl",
+    # 旧モデル (あれば含める — 無ければ自動スキップ)
+    "models/lightgbm_v7.pkl",
+    "models/lightgbm_v5.pkl",
+    "models/lightgbm_v4.pkl",
     "models/lightgbm_v3.pkl",
+    "models/lightgbm_v2.pkl",
+    "models/lightgbm_v1.pkl",
 ]
 
 

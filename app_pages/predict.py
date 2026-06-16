@@ -257,7 +257,12 @@ def _run_pre_race_prediction(
     """出馬表を取得し、過去データから特徴量を構築して予測する"""
     import time
     from src.scraper.race_card import get_upcoming_race_ids
+    from src.features.track_bias import clear_track_bias_cache
     from config.settings import SCRAPE_INTERVAL_SEC
+
+    # 馬場傾向キャッシュをクリア（DB更新後の鮮度確保）。
+    # この後の同一開催日・会場の前日バイアスはバッチ内で再利用され高速化される。
+    clear_track_bias_cache()
 
     # 1) モデル読み込み
     try:

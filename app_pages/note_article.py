@@ -57,7 +57,7 @@ def render():
     with col3:
         intro_text = st.text_area(
             "冒頭あいさつ文（任意）",
-            value="こんにちは。本日も競馬AI「v6モデル」による予想をお届けします。",
+            value="こんにちは。本日も競馬AI「v8モデル」による予想をお届けします。",
             height=80,
             key="note_intro",
         )
@@ -200,14 +200,31 @@ def _generate_article(
 
             # ── 相手馬 ──
             if include_secondary and len(race_df) >= 2:
-                marks = ["○", "▲", "△", "△"]
-                for i, mark in enumerate(marks, start=1):
-                    if i >= len(race_df):
+                MAX_TOTAL = 8           # ◎○▲△ の合計頭数上限
+                DELTA_THRESHOLD = 0.20  # △連下に入れるAI確率の下限
+
+                n_shown = 1  # ◎ (本命) を既に1頭掲載済み
+
+                # ○ 対抗 (2位) / ▲ 単穴 (3位): 上位から無条件で掲載
+                for mark, idx in [("○", 1), ("▲", 2)]:
+                    if idx >= len(race_df):
                         break
-                    h = race_df.iloc[i]
+                    h = race_df.iloc[idx]
                     lines.append(
                         f"{mark} {h['post_number']:.0f}番 {h['horse_name']}  (AI確率 {h['pred_prob']:.1%})"
                     )
+                    n_shown += 1
+
+                # △ 連下: 4位以降で AI確率 20%以上の馬を、合計が MAX_TOTAL になるまで追加
+                for i in range(3, len(race_df)):
+                    if n_shown >= MAX_TOTAL:
+                        break
+                    h = race_df.iloc[i]
+                    if h["pred_prob"] >= DELTA_THRESHOLD:
+                        lines.append(
+                            f"△ {h['post_number']:.0f}番 {h['horse_name']}  (AI確率 {h['pred_prob']:.1%})"
+                        )
+                        n_shown += 1
                 lines.append("")
 
             lines.append("")  # レース間の余白

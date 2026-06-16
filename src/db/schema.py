@@ -1,11 +1,17 @@
 """データベーススキーマ定義とテーブル作成"""
 
 import sqlite3
+from pathlib import Path
+
 from config.settings import DB_PATH
 
 
 def create_tables(db_path=DB_PATH):
     """全テーブルを作成する"""
+    # data/ ディレクトリが無いと sqlite3.connect が失敗するため先に作成
+    # （新PCでの初期セットアップ時は data/ が git 管理外で存在しない）
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 

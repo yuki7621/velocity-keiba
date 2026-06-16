@@ -214,10 +214,14 @@ def _run_review(
     race_ids = target_df["race_id"].unique().tolist()
     payouts = _load_payouts(race_ids)
 
-    # 4) 馬名取得
+    # 4) 馬名・騎手名取得
     with sqlite3.connect(DB_PATH) as conn:
         names_df = pd.read_sql_query("SELECT horse_id, name FROM horses", conn)
+        jockeys_df = pd.read_sql_query(
+            "SELECT jockey_id, name AS jockey_name FROM jockeys", conn
+        )
     target_df = target_df.merge(names_df, on="horse_id", how="left")
+    target_df = target_df.merge(jockeys_df, on="jockey_id", how="left")
 
     # 5) レースごとに評価
     race_rows = []
@@ -400,6 +404,171 @@ def _run_review(
 
     # 6) 表示
     _display_results(target_date, race_rows, detail_rows, preset_label, strategies)
+
+    # 7) 予測 vs 実結果 全馬リスト
+    _display_prediction_vs_result(target_date, target_df, model_name)
+
+
+def _display_prediction_vs_result(target_date: str, target_df: pd.DataFrame, model_name: str):
+    """予測と実レース結果を馬名・馬番込みで全馬リスト化して表示・CSV出力する"""
+    st.divider()
+    st.subheader("📋 予測 vs 実結果 全馬リスト")
+    st.caption(
+        f"対象日 {target_date} の全出走馬について、AI予測 (順位・確率・edge) と"
+        f"実際の着順を並べたリストです。CSV でダウンロードできます。"
+    )
+
+    rows = []
+    for race_id, race_df in target_df.groupby("race_id"):
+        race_df = race_df.sort_values("pred_prob", ascending=False).reset_index(drop=True)
+        venue = race_df["venue"].iloc[0]
+        race_num = str(race_id)[-2:]
+        surface = race_df["surface"].iloc[0]
+        distance = int(race_df["distance"].iloc[0]) if pd.notna(race_df["distance"].iloc[0]) else 0
+        race_label = f"{venue}{race_num}R"
+        race_cond = f"{surface}{distance}m"
+        race_prob_sum = race_df["pred_prob"].sum()
+
+        for ai_rank, (_, row) in enumerate(race_df.iterrows(), start=1):
+            finish = row.get("finish_position")
+            finish_int = int(finish) if pd.notna(finish) and finish > 0 else None
+            pred_prob = float(row["pred_prob"])
+            norm_prob = pred_prob / race_prob_sum if race_prob_sum > 0 else 0.0
+
+            # 予測精度の判定マーク
+            is_top3_actual = finish_int is not None and finish_int <= 3
+            in_ai_top3 = ai_rank <= 3
+            if is_top3_actual and in_ai_top3:
+                hit_mark = "◎ 的中"     # AI Top3 かつ 実際も3着以内
+            elif is_top3_actual and not in_ai_top3:
+                hit_mark = "▲ 見逃し"   # AI Top3 外だが 3着以内に来た
+            elif not is_top3_actual and in_ai_top3:
+                hit_mark = "✗ 外れ"     # AI Top3 だが 4着以下
+            else:
+                hit_mark = ""            # AI Top3 外で 4着以下 (予測通りの凡走)
+
+            rows.append({
+                "日付": target_date,
+                "レース": race_label,
+                "条件": race_cond,
+                "馬番": int(row["post_number"]) if pd.notna(row["post_number"]) else None,
+                "馬名": row.get("name", "?"),
+                "騎手": row.get("jockey_name", ""),
+                "AI順位": ai_rank,
+                "AI確率": round(pred_prob * 100, 1),
+                "相対%": round(norm_prob * 100, 1),
+                "単勝オッズ": round(float(row["odds"]), 1) if pd.notna(row.get("odds")) else None,
+                "人気": int(row["popularity"]) if "popularity" in row.index and pd.notna(row.get("popularity")) else None,
+                "Edge": round(float(row["edge"]), 3) if pd.notna(row.get("edge")) else None,
+                "実着順": finish_int,
+                "判定": hit_mark,
+            })
+
+    result_df = pd.DataFrame(rows)
+
+    # ── サマリー: AI Top3 の的中状況 ──
+    n_races = result_df["レース"].nunique()
+    ai_top3 = result_df[result_df["AI順位"] <= 3]
+    n_hit = (ai_top3["判定"] == "◎ 的中").sum()
+    n_miss = (ai_top3["判定"] == "✗ 外れ").sum()
+    n_overlooked = (result_df["判定"] == "▲ 見逃し").sum()
+
+    cols = st.columns(4)
+    cols[0].metric("対象レース", f"{n_races}R")
+    cols[1].metric("AI Top3 的中", f"{n_hit}頭", help="AI Top3 のうち実際に3着以内に来た数")
+    cols[2].metric("AI Top3 外れ", f"{n_miss}頭", help="AI Top3 のうち4着以下だった数")
+    cols[3].metric("見逃し", f"{n_overlooked}頭", help="AI Top3 外から3着以内に来た数")
+
+    # ── AI順位 Top5 の成績サマリー (1日単位) ──
+    # 「1着-2着-3着-着外 複勝率xx%」の競馬式成績表記でまとめる
+    st.markdown("#### 🏅 AI順位別 成績 (本日)")
+    summary_rows = []
+    for rank in range(1, 6):
+        sub = result_df[result_df["AI順位"] == rank]
+        if len(sub) == 0:
+            continue
+        finishes = sub["実着順"]
+        n1 = int((finishes == 1).sum())
+        n2 = int((finishes == 2).sum())
+        n3 = int((finishes == 3).sum())
+        n_out = int(len(sub) - n1 - n2 - n3)
+        n_total = len(sub)
+        fukusho_rate = (n1 + n2 + n3) / n_total * 100 if n_total > 0 else 0.0
+        win_rate = n1 / n_total * 100 if n_total > 0 else 0.0
+        summary_rows.append({
+            "AI順位": f"{rank}位",
+            "成績": f"{n1}-{n2}-{n3}-{n_out}",
+            "複勝率": f"{fukusho_rate:.1f}%",
+            "勝率": f"{win_rate:.1f}%",
+            "出走数": n_total,
+        })
+
+    if summary_rows:
+        sum_df = pd.DataFrame(summary_rows)
+        st.dataframe(sum_df, width='stretch', hide_index=True)
+        # 1行テキストでも出す（コピペ用）
+        one_liner = "  /  ".join(
+            f"AI{r['AI順位']}: {r['成績']} 複勝率{r['複勝率']}" for r in summary_rows
+        )
+        st.caption(f"📋 {target_date}: {one_liner}")
+
+    st.divider()
+
+    # ── レース別タブ形式表示 (予測ページと同じ expander) ──
+    st.markdown("#### 📋 レース別 予測 vs 結果")
+
+    # 一括展開/畳む
+    btn_e, btn_c, _ = st.columns([1, 1, 4])
+    with btn_e:
+        if st.button("📂 全て展開", key="rdr_pvr_expand_all"):
+            st.session_state["rdr_pvr_expand"] = "all"
+            st.rerun()
+    with btn_c:
+        if st.button("📁 全て畳む", key="rdr_pvr_collapse_all"):
+            st.session_state["rdr_pvr_expand"] = "none"
+            st.rerun()
+    expand_mode = st.session_state.get("rdr_pvr_expand", "auto")
+
+    for race_label in result_df["レース"].unique():
+        race_view = result_df[result_df["レース"] == race_label].sort_values("AI順位")
+        race_cond = race_view["条件"].iloc[0]
+
+        # レース単位の的中状況をラベルに反映
+        n_hit_r = (race_view["判定"] == "◎ 的中").sum()
+        n_overlook_r = (race_view["判定"] == "▲ 見逃し").sum()
+        if n_hit_r == 3:
+            badge = "🎯 3/3 的中"
+        elif n_hit_r > 0:
+            badge = f"◎ {n_hit_r}/3 的中"
+        else:
+            badge = "✗ 0/3"
+        if n_overlook_r > 0:
+            badge += f" ▲{n_overlook_r}"
+
+        # 展開状態: auto = 全的中 or 見逃しありレースを展開
+        if expand_mode == "all":
+            is_expanded = True
+        elif expand_mode == "none":
+            is_expanded = False
+        else:
+            is_expanded = (n_hit_r == 3) or (n_overlook_r > 0)
+
+        with st.expander(f"**{race_label}** — {race_cond}　　{badge}", expanded=is_expanded):
+            disp = race_view[[
+                "馬番", "馬名", "騎手", "AI順位", "AI確率", "相対%",
+                "単勝オッズ", "人気", "Edge", "実着順", "判定",
+            ]].copy()
+            st.dataframe(disp, width='stretch', hide_index=True)
+
+    # ── CSV ダウンロード ──
+    csv_bytes = result_df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "📥 CSV ダウンロード (全馬)",
+        data=csv_bytes,
+        file_name=f"prediction_vs_result_{target_date}_{model_name}.csv",
+        mime="text/csv",
+        key="rdr_pvr_csv",
+    )
 
 
 # ══════════════════════════════════════════════

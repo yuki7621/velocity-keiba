@@ -19,6 +19,16 @@ import pandas as pd
 
 from config.settings import DB_PATH
 
+# (date_str, venue, max_days) → bias dict のメモリキャッシュ。
+# 予測時に同一開催日・同一会場の前日バイアスを毎レース再計算しないための高速化。
+# データ更新後は clear_track_bias_cache() で破棄する。
+_BIAS_CACHE: dict = {}
+
+
+def clear_track_bias_cache() -> None:
+    """馬場傾向のメモリキャッシュをクリアする（データ更新後に呼ぶ）。"""
+    _BIAS_CACHE.clear()
+
 
 def get_race_day_results(
     target_date: str | date,
@@ -215,15 +225,26 @@ def get_track_bias_for_date(
     Args:
         max_days: 何日前までのデータを「前日」とみなすか（0=制限なし）
     """
+    # 同一 (日付, 会場, max_days) はキャッシュから返す（毎レース再計算しない）
+    cache_key = (
+        str(target_date.date() if hasattr(target_date, "date") else target_date),
+        venue,
+        max_days,
+    )
+    if cache_key in _BIAS_CACHE:
+        return _BIAS_CACHE[cache_key]
+
     prev_day = get_previous_day(target_date, venue, db_path, max_days=max_days)
     if prev_day is None:
         print(f"  ※ {venue}の前日データが見つかりません。バイアス=0で計算します。")
-        return _empty_bias()
+        _BIAS_CACHE[cache_key] = _empty_bias()
+        return _BIAS_CACHE[cache_key]
 
     df = get_race_day_results(prev_day, venue, db_path)
     if len(df) == 0:
         print(f"  ※ {venue} {prev_day}のレース結果が空です。")
-        return _empty_bias()
+        _BIAS_CACHE[cache_key] = _empty_bias()
+        return _BIAS_CACHE[cache_key]
 
     bias = analyze_track_bias(df)
     print(f"  {venue} 前日({prev_day}): {bias['n_races']}R分析 "
@@ -231,6 +252,7 @@ def get_track_bias_for_date(
           f"| 脚質={bias['pace_bias']:+.3f} "
           f"| 時計={bias['time_bias']:+.3f} "
           f"| 上がり={bias['last3f_bias']:+.3f}")
+    _BIAS_CACHE[cache_key] = bias
     return bias
 
 
