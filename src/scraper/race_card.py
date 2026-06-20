@@ -9,6 +9,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 from config.settings import USER_AGENT
+from src.scraper._http import apply_netkeiba_encoding
 
 # 出馬表のベースURL（db.netkeiba.com ではなく race.netkeiba.com）
 SHUTUBA_BASE_URL = "https://race.netkeiba.com"
@@ -32,7 +33,7 @@ def scrape_race_card(race_id: str) -> dict | None:
     headers = {"User-Agent": USER_AGENT}
 
     response = requests.get(url, headers=headers, timeout=30)
-    response.encoding = "EUC-JP"
+    apply_netkeiba_encoding(response)
     if response.status_code != 200:
         print(f"Error: {race_id} status={response.status_code}")
         return None
@@ -192,7 +193,7 @@ def get_upcoming_race_ids(date_str: str = None) -> list[str]:
 
     headers = {"User-Agent": USER_AGENT}
     response = requests.get(url, headers=headers, timeout=30)
-    response.encoding = "EUC-JP"
+    apply_netkeiba_encoding(response)
 
     soup = BeautifulSoup(response.text, "lxml")
     race_ids = []

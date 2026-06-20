@@ -4,6 +4,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 from config.settings import NETKEIBA_BASE_URL, USER_AGENT
+from src.scraper._http import apply_netkeiba_encoding
 
 
 # 払戻テーブルの券種ラベル → 内部名
@@ -75,7 +76,7 @@ def _scrape_from_db(race_id: str) -> dict | None:
 
     try:
         response = requests.get(url, headers=headers, timeout=30)
-        response.encoding = "EUC-JP"
+        apply_netkeiba_encoding(response)
     except Exception:
         return None
 
@@ -103,7 +104,7 @@ def _scrape_from_race_site(race_id: str) -> dict | None:
 
     try:
         response = requests.get(url, headers=headers, timeout=30)
-        response.encoding = "EUC-JP"
+        apply_netkeiba_encoding(response)
     except Exception:
         return None
 

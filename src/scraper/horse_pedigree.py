@@ -4,6 +4,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 from config.settings import NETKEIBA_BASE_URL, USER_AGENT
+from src.scraper._http import apply_netkeiba_encoding
 
 
 def scrape_pedigree(horse_id: str) -> dict | None:
@@ -19,7 +20,7 @@ def scrape_pedigree(horse_id: str) -> dict | None:
 
     try:
         response = requests.get(url, headers=headers, timeout=30)
-        response.encoding = "EUC-JP"
+        apply_netkeiba_encoding(response)
     except Exception:
         return None
 

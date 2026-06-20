@@ -5,6 +5,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from config.settings import NETKEIBA_BASE_URL, SCRAPE_INTERVAL_SEC, USER_AGENT
+from src.scraper._http import apply_netkeiba_encoding
 
 # 1ページあたりの表示件数
 _PER_PAGE = 20
@@ -50,7 +51,7 @@ def get_race_ids_by_month(year: int, month: int) -> list[str]:
 
     # 1ページ目
     response = requests.get(base_url, headers=headers, timeout=30)
-    response.encoding = "EUC-JP"
+    apply_netkeiba_encoding(response)
     soup = BeautifulSoup(response.text, "lxml")
 
     all_ids.extend(_extract_race_ids_from_page(soup))
@@ -65,7 +66,7 @@ def get_race_ids_by_month(year: int, month: int) -> list[str]:
         time.sleep(SCRAPE_INTERVAL_SEC)
         page_url = f"{base_url}&page={page}"
         response = requests.get(page_url, headers=headers, timeout=30)
-        response.encoding = "EUC-JP"
+        apply_netkeiba_encoding(response)
         soup = BeautifulSoup(response.text, "lxml")
         all_ids.extend(_extract_race_ids_from_page(soup))
 
