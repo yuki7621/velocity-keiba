@@ -339,12 +339,22 @@ def _run_pre_race_prediction(
 def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: str):
     """レース前予測の結果を表示する"""
 
-    # 全レース再予測ボタン（オプション）
-    col_a, col_b, col_c = st.columns([1, 1, 4])
+    # 全レース再予測ボタン + 当日予測の保存ボタン
+    col_a, col_b, col_c = st.columns([1, 1.4, 3])
     with col_a:
         if st.button("🗑️ 結果クリア", key="btn_clear_results"):
             st.session_state["prerace_results"] = None
             st.rerun()
+    with col_b:
+        if st.button("💾 この予測をDBに保存", key="btn_save_predictions",
+                     help="当日の予測をそのままDBに保存し、後日「収支レビュー」で実結果と正確に突き合わせられます。"
+                          "（再計算ではなく当日の値を保持するため、DB更新後も予測がブレません）"):
+            from src.db.predictions import save_predictions
+            n = save_predictions(df, model_name=model_name, race_date=str(target_date)[:10])
+            st.success(
+                f"✅ {df['race_id'].nunique()}レース・{n}頭の予測を保存しました。"
+                f"後日「🪞 収支レビュー」で『当日保存した予測』を選んで参照できます。"
+            )
 
     # ── 補完モードの警告バナー ──
     imputed_flag = bool(st.session_state.get("prerace_results_imputed", False))

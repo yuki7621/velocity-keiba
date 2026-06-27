@@ -103,6 +103,30 @@ def render():
             help="v8 推奨（オッズ帯フィルタの基準値も v8 診断結果準拠）",
         )
 
+    # ── 予測ソース選択 ──
+    from src.db.predictions import has_predictions
+    saved_exists = has_predictions(str(target_date)[:10], model_name)
+    pred_source = st.radio(
+        "予測ソース",
+        ["💾 当日保存した予測を使う", "🔄 今のモデルで再計算"],
+        horizontal=True,
+        index=0 if saved_exists else 1,
+        key="rdr_pred_source",
+        help=(
+            "💾 当日保存: 予測ページで『この予測をDBに保存』したスナップショットを使用。"
+            "DB更新の影響を受けず、当日に実際に出した予測と実結果を正確に突き合わせられます（推奨）。\n"
+            "🔄 再計算: 今のDB・モデルでその場で予測し直す（当日と値がズレる場合あり）。"
+        ),
+    )
+    use_saved = pred_source.startswith("💾")
+    if use_saved and not saved_exists:
+        st.warning(
+            f"⚠️ {target_date} の保存済み予測がありません（モデル {model_name}）。"
+            "予測ページで『💾 この予測をDBに保存』を実行するか、『🔄 今のモデルで再計算』を選んでください。"
+        )
+    elif saved_exists:
+        st.caption(f"💾 {target_date} の保存済み予測が利用可能です（モデル {model_name}）。")
+
     with col3:
         edge_threshold = st.slider(
             "Edge 閾値 (単勝・複勝用)",
@@ -167,7 +191,88 @@ def render():
             ODDS_PRESETS[odds_preset_label], odds_preset_label,
             strategies,
             ev_threshold, ev_max_per_race,
+            use_saved=use_saved,
         )
+
+
+# ══════════════════════════════════════════════
+# target_df ビルダー（予測ソース別）
+# ══════════════════════════════════════════════
+
+def _build_target_df_from_recompute(target_date: str, model_name: str):
+    """今のDB・モデルで再計算して target_df を作る（従来方式・build_all_features 使用）"""
+    try:
+        model = _load_model_cached(model_name)
+    except FileNotFoundError:
+        st.error(f"モデル {model_name} が見つかりません。")
+        return None
+
+    df = _build_features_cached()
+    df = prepare_dataset(df)
+    features = get_available_features(df)
+
+    target_df = df[df["date"] == target_date].copy()
+    if len(target_df) == 0:
+        st.warning(f"{target_date} の出走データが見つかりません。")
+        return None
+
+    target_df["pred_prob"] = model.predict_proba(target_df[features])[:, 1]
+    target_df = add_market_top3_column(target_df, out_col="market_prob")
+    target_df["market_prob"] = target_df["market_prob"].fillna(
+        (3.0 / target_df["odds"]).clip(upper=1.0)
+    )
+    target_df["edge"] = target_df["pred_prob"] - target_df["market_prob"]
+
+    # 馬名・騎手名
+    with sqlite3.connect(DB_PATH) as conn:
+        names_df = pd.read_sql_query("SELECT horse_id, name FROM horses", conn)
+        jockeys_df = pd.read_sql_query("SELECT jockey_id, name AS jockey_name FROM jockeys", conn)
+    target_df = target_df.merge(names_df, on="horse_id", how="left")
+    target_df = target_df.merge(jockeys_df, on="jockey_id", how="left")
+    return target_df
+
+
+def _build_target_df_from_saved(target_date: str, model_name: str):
+    """当日保存した予測スナップショット + 実結果 から target_df を作る（高速・当日値そのまま）"""
+    from src.db.predictions import load_predictions
+
+    saved = load_predictions(str(target_date)[:10], model_name)
+    if saved is None or len(saved) == 0:
+        st.warning(
+            f"⚠️ {target_date} の保存済み予測がありません（モデル {model_name}）。"
+            "予測ページで『💾 この予測をDBに保存』を実行してください。"
+        )
+        return None
+
+    race_ids = saved["race_id"].astype(str).unique().tolist()
+    placeholders = ",".join("?" * len(race_ids))
+    with sqlite3.connect(DB_PATH) as conn:
+        results = pd.read_sql_query(
+            f"SELECT race_id, post_number, finish_position, popularity "
+            f"FROM results WHERE race_id IN ({placeholders})",
+            conn, params=race_ids,
+        )
+        races = pd.read_sql_query(
+            f"SELECT race_id, venue, surface, distance, condition "
+            f"FROM races WHERE race_id IN ({placeholders})",
+            conn, params=race_ids,
+        )
+
+    # 保存済み予測を土台に、実結果(finish_position)とレース情報をマージ
+    target_df = saved.rename(columns={"horse_name": "name"}).copy()
+    target_df["race_id"] = target_df["race_id"].astype(str)
+    results["race_id"] = results["race_id"].astype(str)
+    races["race_id"] = races["race_id"].astype(str)
+    target_df = target_df.merge(results, on=["race_id", "post_number"], how="left")
+    target_df = target_df.merge(races, on="race_id", how="left")
+
+    if target_df["finish_position"].isna().all():
+        st.warning(
+            f"⚠️ {target_date} の実結果がまだDBにありません。"
+            "「🔄 データ更新」でレース結果を取得してから再実行してください。"
+        )
+        return None
+    return target_df
 
 
 # ══════════════════════════════════════════════
@@ -183,45 +288,23 @@ def _run_review(
     strategies: list,
     ev_threshold: float = 1.10,
     ev_max_per_race: int = 5,
+    use_saved: bool = False,
 ):
-    # 1) モデル読み込み
-    try:
-        model = _load_model_cached(model_name)
-    except FileNotFoundError:
-        st.error(f"モデル {model_name} が見つかりません。")
-        return
-
-    # 2) 特徴量構築 + 予測
-    df = _build_features_cached()
-    df = prepare_dataset(df)
-    features = get_available_features(df)
-
-    target_df = df[df["date"] == target_date].copy()
-    if len(target_df) == 0:
-        st.warning(f"{target_date} の出走データが見つかりません。")
-        return
-
-    target_df["pred_prob"] = model.predict_proba(target_df[features])[:, 1]
-
-    # 市場確率・エッジ
-    target_df = add_market_top3_column(target_df, out_col="market_prob")
-    target_df["market_prob"] = target_df["market_prob"].fillna(
-        (3.0 / target_df["odds"]).clip(upper=1.0)
-    )
-    target_df["edge"] = target_df["pred_prob"] - target_df["market_prob"]
+    # 1-2) 予測ソースに応じて target_df を構築
+    if use_saved:
+        target_df = _build_target_df_from_saved(target_date, model_name)
+        if target_df is None:
+            return
+        st.info(f"💾 当日保存した予測（モデル {model_name}）を使用しています。")
+    else:
+        target_df = _build_target_df_from_recompute(target_date, model_name)
+        if target_df is None:
+            return
+        st.info("🔄 今のDB・モデルで再計算した予測を使用しています（当日と値がズレる場合があります）。")
 
     # 3) 払戻データを一括取得
     race_ids = target_df["race_id"].unique().tolist()
     payouts = _load_payouts(race_ids)
-
-    # 4) 馬名・騎手名取得
-    with sqlite3.connect(DB_PATH) as conn:
-        names_df = pd.read_sql_query("SELECT horse_id, name FROM horses", conn)
-        jockeys_df = pd.read_sql_query(
-            "SELECT jockey_id, name AS jockey_name FROM jockeys", conn
-        )
-    target_df = target_df.merge(names_df, on="horse_id", how="left")
-    target_df = target_df.merge(jockeys_df, on="jockey_id", how="left")
 
     # 5) レースごとに評価
     race_rows = []
