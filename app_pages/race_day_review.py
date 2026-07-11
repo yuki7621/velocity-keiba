@@ -532,6 +532,7 @@ def _display_prediction_vs_result(target_date: str, target_df: pd.DataFrame, mod
 
             rows.append({
                 "日付": target_date,
+                "競馬場": venue,
                 "レース": race_label,
                 "条件": race_cond,
                 "馬番": int(row["post_number"]) if pd.notna(row["post_number"]) else None,
@@ -564,36 +565,65 @@ def _display_prediction_vs_result(target_date: str, target_df: pd.DataFrame, mod
 
     # ── AI順位 Top5 の成績サマリー (1日単位) ──
     # 「1着-2着-3着-着外 複勝率xx%」の競馬式成績表記でまとめる
-    st.markdown("#### 🏅 AI順位別 成績 (本日)")
-    summary_rows = []
-    for rank in range(1, 6):
-        sub = result_df[result_df["AI順位"] == rank]
-        if len(sub) == 0:
-            continue
-        finishes = sub["実着順"]
-        n1 = int((finishes == 1).sum())
-        n2 = int((finishes == 2).sum())
-        n3 = int((finishes == 3).sum())
-        n_out = int(len(sub) - n1 - n2 - n3)
-        n_total = len(sub)
-        fukusho_rate = (n1 + n2 + n3) / n_total * 100 if n_total > 0 else 0.0
-        win_rate = n1 / n_total * 100 if n_total > 0 else 0.0
-        summary_rows.append({
-            "AI順位": f"{rank}位",
-            "成績": f"{n1}-{n2}-{n3}-{n_out}",
-            "複勝率": f"{fukusho_rate:.1f}%",
-            "勝率": f"{win_rate:.1f}%",
-            "出走数": n_total,
-        })
+    def _rank_summary(df_part: pd.DataFrame) -> list[dict]:
+        """AI順位1〜5位の成績 (1着-2着-3着-着外 / 複勝率 / 勝率) を集計"""
+        out = []
+        for rank in range(1, 6):
+            sub = df_part[df_part["AI順位"] == rank]
+            if len(sub) == 0:
+                continue
+            finishes = sub["実着順"]
+            n1 = int((finishes == 1).sum())
+            n2 = int((finishes == 2).sum())
+            n3 = int((finishes == 3).sum())
+            n_out = int(len(sub) - n1 - n2 - n3)
+            n_total = len(sub)
+            out.append({
+                "AI順位": f"{rank}位",
+                "成績": f"{n1}-{n2}-{n3}-{n_out}",
+                "複勝率": f"{(n1 + n2 + n3) / n_total * 100:.1f}%",
+                "勝率": f"{n1 / n_total * 100:.1f}%",
+                "出走数": n_total,
+            })
+        return out
 
-    if summary_rows:
-        sum_df = pd.DataFrame(summary_rows)
-        st.dataframe(sum_df, width='stretch', hide_index=True)
-        # 1行テキストでも出す（コピペ用）
-        one_liner = "  /  ".join(
-            f"AI{r['AI順位']}: {r['成績']} 複勝率{r['複勝率']}" for r in summary_rows
+    def _rank_one_liner(summary: list[dict]) -> str:
+        return "  /  ".join(
+            f"AI{r['AI順位']}: {r['成績']} 複勝率{r['複勝率']}" for r in summary
         )
-        st.caption(f"📋 {target_date}: {one_liner}")
+
+    st.markdown("#### 🏅 AI順位別 成績 (本日)")
+    summary_rows = _rank_summary(result_df)
+    if summary_rows:
+        st.dataframe(pd.DataFrame(summary_rows), width='stretch', hide_index=True)
+        # 1行テキストでも出す（コピペ用）
+        st.caption(f"📋 {target_date}: {_rank_one_liner(summary_rows)}")
+
+    # ── 競馬場別 AI順位別成績 ──
+    venues = sorted(result_df["競馬場"].dropna().unique().tolist())
+    if len(venues) >= 2:
+        st.markdown("#### 🏇 競馬場別 AI順位別成績")
+        venue_tabs = st.tabs(venues)
+        for tab, venue in zip(venue_tabs, venues):
+            with tab:
+                vdf = result_df[result_df["競馬場"] == venue]
+                n_races_v = vdf["レース"].nunique()
+                v_top3 = vdf[vdf["AI順位"] <= 3]
+                v_hit = (v_top3["判定"] == "◎ 的中").sum()
+                v_miss = (v_top3["判定"] == "✗ 外れ").sum()
+                v_overlook = (vdf["判定"] == "▲ 見逃し").sum()
+                vc = st.columns(4)
+                vc[0].metric("レース数", f"{n_races_v}R")
+                vc[1].metric("AI Top3 的中", f"{v_hit}頭")
+                vc[2].metric("AI Top3 外れ", f"{v_miss}頭")
+                vc[3].metric("見逃し", f"{v_overlook}頭")
+
+                v_summary = _rank_summary(vdf)
+                if v_summary:
+                    st.dataframe(pd.DataFrame(v_summary), width='stretch', hide_index=True)
+                    st.caption(f"📋 {target_date} {venue}: {_rank_one_liner(v_summary)}")
+                else:
+                    st.info("集計対象データがありません。")
 
     st.divider()
 
