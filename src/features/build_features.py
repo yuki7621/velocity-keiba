@@ -13,7 +13,7 @@ from src.features.track_bias import add_track_bias_features
 
 def load_results(db_path=DB_PATH) -> pd.DataFrame:
     """全結果データを読み込む（実複勝払戻・調教師も結合）"""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=60)
     query = """
         SELECT
             r.race_id, r.horse_id, r.jockey_id, r.trainer_id,
@@ -131,7 +131,7 @@ def race_cards_to_pending(cards: list[dict], db_path=DB_PATH) -> pd.DataFrame:
     df["sex"] = df["sex_age"].map(lambda s: str(s)[0] if s else None)
 
     # 血統は horses テーブルから引く（学習時と同じ情報源）
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=60)
     ped = pd.read_sql_query("SELECT horse_id, sire, dam_sire FROM horses", conn)
     conn.close()
     df = df.merge(ped, on="horse_id", how="left")

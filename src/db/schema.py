@@ -15,6 +15,15 @@ def create_tables(db_path=DB_PATH):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
+    # WAL モード: 読み込みと書き込みが互いにブロックしないようにする。
+    # 既定の delete(ロールバックジャーナル)では、予測時の特徴量構築(25万行の読込)中に
+    # スクレイパーの書き込みが来ると "database is locked" で失敗していた。
+    # WAL は一度設定すればDBファイルの属性として永続する。
+    try:
+        cur.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        pass
+
     # レーステーブル
     cur.execute("""
         CREATE TABLE IF NOT EXISTS races (

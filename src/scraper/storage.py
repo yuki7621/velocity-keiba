@@ -47,7 +47,9 @@ def save_race_data(data: dict, db_path=DB_PATH):
     if is_jump_race(race):
         return {"skipped": True, "reason": "jump_race", "race_id": race.get("race_id")}
 
-    conn = sqlite3.connect(db_path)
+    # timeout: 予測の特徴量構築など長い読み込みと同時実行されても
+    # "database is locked" で落ちないよう待機する（WAL併用で通常は待たない）
+    conn = sqlite3.connect(db_path, timeout=60)
     cur = conn.cursor()
 
     # head_count: race_info に無ければ results 行数で補完
