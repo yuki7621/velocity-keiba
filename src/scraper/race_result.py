@@ -223,6 +223,14 @@ def _parse_result_table_race_site(soup: BeautifulSoup, race_id: str) -> list[dic
         # 結果未確定（レース前）
         return rows
 
+    # ヘッダー名 → 列インデックス（列の増減や並び替えに耐えるため）
+    header_idx: dict[str, int] = {}
+    head_cells = table.select("thead th") or table.select("thead td")
+    for i, th in enumerate(head_cells):
+        name = th.get_text(strip=True)
+        if name and name not in header_idx:
+            header_idx[name] = i
+
     for tr in table.select("tbody tr"):
         tds = tr.select("td")
         if len(tds) < 10:
@@ -270,47 +278,52 @@ def _parse_result_table_race_site(soup: BeautifulSoup, race_id: str) -> list[dic
 
         # 着差 [8] — スキップ
 
-        # 後半のカラムはテーブル構造に依存するので安全に取得
-        remaining = tds[9:]
+        # ── 9列目以降はヘッダー名で対応付ける ──
+        # 以前は正規表現による推測で拾っていたが、単勝オッズが2桁(例 14.5)だと
+        # 「後3F」のパターン(^\d{2}\.\d$)に先にマッチしてしまい、
+        # オッズと上がり3Fが入れ替わって保存される重大なバグがあった。
+        # ヘッダー行から列位置を引くことで確実に対応付ける。
+        def _col(*names):
+            for nm in names:
+                idx = header_idx.get(nm)
+                if idx is not None and idx < len(tds):
+                    return tds[idx]
+            return None
 
-        # 通過順、上がり3F、単勝オッズ、人気、馬体重を順に探す
-        for td in remaining:
-            text = td.get_text(strip=True)
+        td_pop = _col("人気")
+        if td_pop is not None:
+            row["popularity"] = _to_int(td_pop.get_text(strip=True))
 
-            # 通過順 (例: "3-3-2-1")
-            if re.match(r"^\d+-\d+", text) and "passing_order" not in row:
-                row["passing_order"] = text
-                continue
+        td_odds = _col("単勝オッズ", "単勝")
+        if td_odds is not None:
+            row["odds"] = _to_float(td_odds.get_text(strip=True))
 
-            # 上がり3F (例: "34.5")
-            if re.match(r"^\d{2}\.\d$", text) and "last_3f" not in row:
-                row["last_3f"] = _to_float(text)
-                continue
+        td_3f = _col("後3F", "上り", "上がり")
+        if td_3f is not None:
+            row["last_3f"] = _to_float(td_3f.get_text(strip=True))
 
-            # 単勝オッズ (例: "3.5")
-            if re.match(r"^\d+\.\d$", text) and "odds" not in row:
-                row["odds"] = _to_float(text)
-                continue
+        td_pass = _col("コーナー通過順", "通過")
+        if td_pass is not None:
+            row["passing_order"] = td_pass.get_text(strip=True)
 
-            # 人気 (例: "1")
-            if text.isdigit() and int(text) <= 30 and "popularity" not in row and "odds" in row:
-                row["popularity"] = _to_int(text)
-                continue
+        td_w = _col("馬体重(増減)", "馬体重")
+        if td_w is not None:
+            row.update(_parse_horse_weight(td_w.get_text(strip=True)))
 
-            # 馬体重 (例: "480(+4)")
-            m = re.match(r"(\d+)\(([+-]?\d+)\)", text)
-            if m and "horse_weight" not in row:
-                row["horse_weight"] = int(m.group(1))
-                row["weight_change"] = int(m.group(2))
-                continue
+        # 調教師: 列位置に依らず行全体からリンクを探す
+        row["trainer_name"] = ""
+        row["trainer_id"] = ""
+        trainer_link = tr.select_one("a[href*='/trainer/']")
+        if trainer_link:
+            row["trainer_name"] = trainer_link.get_text(strip=True)
+            m2 = re.search(r"/trainer/(?:result/recent/)?(\d+)", trainer_link.get("href", ""))
+            row["trainer_id"] = m2.group(1) if m2 else ""
 
-            # 調教師 (リンクを別途探す)
-            trainer_link = td.select_one("a[href*='/trainer/']")
-            if trainer_link and "trainer_id" not in row:
-                row["trainer_name"] = trainer_link.get_text(strip=True)
-                href = trainer_link.get("href", "")
-                m2 = re.search(r"/trainer/(?:result/recent/)?(\d+)", href)
-                row["trainer_id"] = m2.group(1) if m2 else ""
+        # 性別（性齢 "牝3" から）
+        row.update(_parse_sex_age(row.get("sex_age", "")))
+
+        # ※ 賞金はこのページに列が無い（db.netkeiba 側にのみ存在）。
+        #   翌日以降に db.netkeiba から取り直すと補完される。
 
         rows.append(row)
 
