@@ -165,6 +165,16 @@ def _parse_entries(soup: BeautifulSoup, race_id: str) -> list[dict]:
             entry["jockey_name"] = tds[6].get_text(strip=True)
             entry["jockey_id"] = ""
 
+        # [7] 調教師 (例: href="/trainer/result/recent/01126/")
+        # 列位置がズレても拾えるよう行全体からリンクを探す
+        entry["trainer_name"] = ""
+        entry["trainer_id"] = ""
+        trainer_link = tr.select_one("a[href*='/trainer/']")
+        if trainer_link:
+            entry["trainer_name"] = trainer_link.get_text(strip=True)
+            m = re.search(r"/trainer/(?:result/recent/)?(\d+)", trainer_link.get("href", ""))
+            entry["trainer_id"] = m.group(1) if m else ""
+
         # [8] 馬体重 (例: "504(+4)")
         if len(tds) > 8:
             weight_text = tds[8].get_text(strip=True)

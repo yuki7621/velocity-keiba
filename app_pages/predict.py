@@ -7,8 +7,7 @@ import numpy as np
 from datetime import date, datetime
 
 from config.settings import DB_PATH
-from src.features.predict_features import build_prediction_features
-from src.model.train import load_model, FEATURE_COLUMNS, get_available_features
+from src.model.train import load_model, get_available_features
 from src.betting.sanrenpuku_filter import (
     evaluate_race as evaluate_sanrenpuku,
     STRATEGY_NAME as SANRENPUKU_STRATEGY,
@@ -109,87 +108,80 @@ def _render_pre_race_prediction():
         _display_pre_race_results(result_df, result_date, result_model)
 
 
-def _repredict_single_race(race_id: str, target_date: str, model_name: str):
-    """単一レースを再取得・再予測してsession_stateを更新する"""
+def _repredict_single_race(race_id: str, target_date: str, model_name: str,
+                           rebuild_features: bool = False):
+    """単一レースを再取得して session_state を更新する
+
+    Args:
+        rebuild_features: False（既定）なら**オッズのみ再取得**して edge/EV を
+            計算し直す高速パス。過去成績ベースの特徴量は再取得しても変わらない
+            ため、オッズ更新用途ではこれで十分（数秒で完了）。
+            True なら出馬表ごと取り直し、学習と同じパイプラインで特徴量を
+            再構築する（馬体重の発表後など。約2分）。
+    """
+    current = st.session_state.get("prerace_results")
+
+    # ── 高速パス: オッズだけ更新（特徴量は変わらないので再構築しない）──
+    if not rebuild_features and current is not None:
+        g = current[current["race_id"] == race_id].copy()
+        if len(g) > 0:
+            with st.spinner(f"{race_id} のオッズを再取得中..."):
+                g = _attach_odds(g, str(race_id))
+                g = _add_edge_columns(g)
+            remaining = current[current["race_id"] != race_id]
+            st.session_state["prerace_results"] = pd.concat([remaining, g], ignore_index=True)
+            st.success(f"✅ {race_id} のオッズを更新しました（AI確率は変わりません）")
+            return
+
+    # ── 完全再構築パス: 出馬表から取り直して学習と同じ経路で特徴量を作る ──
+    from src.features.build_features import build_all_features, race_cards_to_pending
+    from src.model.train import get_available_features, prepare_dataset
+    from src.scraper.race_card import scrape_race_card
+
     try:
         model = _load_model(model_name)
     except FileNotFoundError:
         st.error(f"モデル {model_name} が見つかりません。")
         return
 
-    # target_date は str なので date オブジェクトに変換
-    if isinstance(target_date, str):
+    with st.spinner(f"{race_id} を再取得して特徴量を再構築中...（約2分）"):
         try:
-            td = datetime.strptime(target_date, "%Y-%m-%d").date()
-        except ValueError:
-            td = date.today()
-    else:
-        td = target_date
+            card = scrape_race_card(race_id)
+        except Exception as e:
+            st.error(f"⚠️ {race_id}: 出馬表取得エラー ({e})")
+            return
+        if card is None:
+            st.error(f"⚠️ {race_id} の出馬表を取得できませんでした。")
+            return
+        if not card["race_info"].get("date"):
+            card["race_info"]["date"] = str(target_date)
 
-    # 元の予測実行時のフラグを引き継ぐ（ただし単一再予測は発表後想定なのでデフォルトFalse）
-    impute_weight = bool(st.session_state.get("prerace_results_imputed", False))
+        pending = race_cards_to_pending([card])
+        full_df = build_all_features(pending_races=pending)
+        full_df = prepare_dataset(full_df, keep_pending=True)
+        features = get_available_features(full_df)
 
-    with st.spinner(f"{race_id} を再取得中..."):
-        new_feat = _predict_single_race(race_id, td, model, impute_weight=impute_weight)
+        new_feat = full_df[full_df["is_pending"] == 1].copy()
+        if len(new_feat) == 0:
+            st.error(f"⚠️ {race_id} の特徴量を構築できませんでした。")
+            return
+        new_feat["pred_prob"] = model.predict_proba(new_feat[features])[:, 1]
+        new_feat = _attach_odds(new_feat, str(race_id))
+        new_feat = _add_edge_columns(new_feat)
 
-    if new_feat is None or len(new_feat) == 0:
-        st.error(f"⚠️ {race_id} の再予測に失敗しました。")
-        return
-
-    # session_state内の該当レースを差し替え
-    current = st.session_state.get("prerace_results")
     if current is None:
         st.session_state["prerace_results"] = new_feat
     else:
-        # race_idが一致する行を削除して新しい行を追加
         remaining = current[current["race_id"] != race_id]
-        st.session_state["prerace_results"] = pd.concat(
-            [remaining, new_feat], ignore_index=True
-        )
+        st.session_state["prerace_results"] = pd.concat([remaining, new_feat], ignore_index=True)
 
     st.success(f"✅ {race_id} を再予測しました！")
 
 
-def _predict_single_race(
-    race_id: str,
-    target_date: date,
-    model,
-    impute_weight: bool = False,
-) -> pd.DataFrame | None:
-    """単一レースの出馬表を取得 → 特徴量構築 → 予測。失敗時はNone。
-
-    出馬表に加え、netkeibaの単勝オッズも取得して `odds` 列に格納する。
-    オッズが取得できれば edge / expected_value も計算する。
-    （発走前にはオッズが未確定でNaNになることがあるため、失敗してもfeat_dfは返す）
-    """
-    from src.scraper.race_card import scrape_race_card
+def _attach_odds(feat_df: pd.DataFrame, race_id: str) -> pd.DataFrame:
+    """単勝オッズを取得して odds 列に付与する（失敗時は NaN のまま継続）"""
     from src.scraper.odds import fetch_all_odds
 
-    try:
-        card = scrape_race_card(race_id)
-    except Exception as e:
-        st.warning(f"⚠️ {race_id}: 出馬表取得エラー ({e})")
-        return None
-
-    if card is None:
-        return None
-
-    race_info = card["race_info"]
-    entries = card["entries"]
-
-    if "date" not in race_info or not race_info["date"]:
-        race_info["date"] = str(target_date)
-
-    try:
-        feat_df = build_prediction_features(entries, race_info, impute_weight=impute_weight)
-    except Exception as e:
-        st.warning(f"⚠️ {race_id}: 特徴量構築エラー ({e})")
-        return None
-
-    if len(feat_df) == 0:
-        return None
-
-    # 単勝オッズを取得して `odds` 列に追加（取得失敗してもNaNで継続）
     odds_fetched_at = datetime.now().strftime("%H:%M:%S")
     odds_official_dt = None
     try:
@@ -201,13 +193,11 @@ def _predict_single_race(
         tansho = {}
 
     if tansho:
-        # post_number(int) → 文字列キー("1", "2", ...) でマッピング
         feat_df["odds"] = feat_df["post_number"].apply(
             lambda p: tansho.get(str(int(p))) if pd.notna(p) else None
         )
         feat_df["odds_fetched_at"] = odds_fetched_at
         feat_df["odds_official_dt"] = odds_official_dt or ""
-        # デバッグ用: fetch直後の生tanshoをsession_stateに保存（レース別）
         try:
             st.session_state.setdefault("odds_debug", {})[race_id] = {
                 "fetched_at": odds_fetched_at,
@@ -220,18 +210,12 @@ def _predict_single_race(
         feat_df["odds"] = np.nan
         feat_df["odds_fetched_at"] = ""
         feat_df["odds_official_dt"] = ""
+    return feat_df
 
-    # 欠損カラムは0で埋める
-    for mc in [c for c in FEATURE_COLUMNS if c not in feat_df.columns]:
-        feat_df[mc] = 0.0
 
-    X = feat_df[FEATURE_COLUMNS].astype(float)
-    feat_df["pred_prob"] = model.predict_proba(X)[:, 1]
-    feat_df["race_title"] = race_info.get("title", "")
-    feat_df["start_time"] = race_info.get("start_time", "")  # 発走時刻 (HH:MM)
-
-    # edge / expected_value（オッズがあれば計算）
-    if feat_df["odds"].notna().any():
+def _add_edge_columns(feat_df: pd.DataFrame) -> pd.DataFrame:
+    """オッズから market_prob / edge / expected_value を計算する"""
+    if "odds" in feat_df.columns and feat_df["odds"].notna().any():
         from src.betting.market_implied import add_market_top3_column
         feat_df = add_market_top3_column(feat_df, out_col="market_prob")
         # Plackett-Luce が NaN の行は旧式（3/odds）でフォールバック
@@ -243,7 +227,6 @@ def _predict_single_race(
         feat_df["market_prob"] = np.nan
         feat_df["edge"] = np.nan
         feat_df["expected_value"] = np.nan
-
     return feat_df
 
 
@@ -254,11 +237,14 @@ def _run_pre_race_prediction(
     model_name: str,
     impute_weight: bool = False,
 ):
-    """出馬表を取得し、過去データから特徴量を構築して予測する"""
+    """出馬表を取得し、学習と同一のパイプラインで特徴量を構築して予測する"""
     import time
-    from src.scraper.race_card import get_upcoming_race_ids
-    from src.features.track_bias import clear_track_bias_cache
+
     from config.settings import SCRAPE_INTERVAL_SEC
+    from src.features.build_features import build_all_features, race_cards_to_pending
+    from src.features.track_bias import clear_track_bias_cache
+    from src.model.train import get_available_features, prepare_dataset
+    from src.scraper.race_card import get_upcoming_race_ids, scrape_race_card
 
     # 馬場傾向キャッシュをクリア（DB更新後の鮮度確保）。
     # この後の同一開催日・会場の前日バイアスはバッチ内で再利用され高速化される。
@@ -287,38 +273,77 @@ def _run_pre_race_prediction(
 
     status.info(f"📡 {len(race_ids)} レースが見つかりました。出馬表を取得中...")
 
-    # 3) 各レースの出馬表を取得 & 予測
+    # 3) 全レースの出馬表を取得（この時点では予測しない）
     progress = st.progress(0)
-    all_predictions = []
-
+    cards = []
     for i, race_id in enumerate(race_ids):
-        progress.progress((i + 1) / len(race_ids))
-
-        feat_df = _predict_single_race(race_id, target_date, model, impute_weight=impute_weight)
-        if feat_df is None:
+        progress.progress((i + 1) / len(race_ids) * 0.6)
+        try:
+            card = scrape_race_card(race_id)
+        except Exception as e:
+            st.warning(f"⚠️ {race_id}: 出馬表取得エラー ({e})")
+            time.sleep(SCRAPE_INTERVAL_SEC)
+            continue
+        if card is None:
             time.sleep(SCRAPE_INTERVAL_SEC)
             continue
 
-        # 競馬場フィルタ
-        venue = feat_df["venue"].iloc[0] if "venue" in feat_df.columns else ""
+        info = card["race_info"]
+        if not info.get("date"):
+            info["date"] = str(target_date)
+        venue = info.get("venue", "")
         if venues and venue not in venues:
             time.sleep(SCRAPE_INTERVAL_SEC)
             continue
 
-        status.info(f"📡 {venue} {str(race_id)[-2:]}R を処理中...")
-
-        all_predictions.append(feat_df)
+        status.info(f"📡 {venue} {str(race_id)[-2:]}R の出馬表を取得中...")
+        cards.append(card)
         time.sleep(SCRAPE_INTERVAL_SEC)
 
-    progress.progress(1.0)
-    status.empty()
-
-    if not all_predictions:
+    if not cards:
+        progress.empty()
+        status.empty()
         st.warning("予測可能なレースがありませんでした。")
         return
 
-    # 4) 結果を結合してsession_stateに保存
-    result_df = pd.concat(all_predictions, ignore_index=True)
+    # 4) 学習と同一のパイプラインで特徴量を構築して一括予測
+    #    ※ 予測専用の近似実装だと脚質・レース内相対値が学習時と別物になり
+    #      AUC が 0.064 劣化していたため、必ずこの経路を通す
+    status.info(f"🧮 {len(cards)} レース分の特徴量を構築中...（約2分）")
+    progress.progress(0.7)
+
+    pending = race_cards_to_pending(cards)
+    full_df = build_all_features(pending_races=pending)
+    full_df = prepare_dataset(full_df, keep_pending=True)
+    features = get_available_features(full_df)
+
+    target_df = full_df[full_df["is_pending"] == 1].copy()
+    if len(target_df) == 0:
+        progress.empty()
+        status.empty()
+        st.warning("予測対象の行を構築できませんでした。")
+        return
+
+    target_df["pred_prob"] = model.predict_proba(target_df[features])[:, 1]
+    progress.progress(0.85)
+
+    # 5) レースごとにオッズを取得して edge / EV を計算
+    status.info("📡 オッズを取得中...")
+    per_race = []
+    race_id_list = list(target_df["race_id"].unique())
+    for i, rid in enumerate(race_id_list):
+        progress.progress(0.85 + (i + 1) / len(race_id_list) * 0.15)
+        g = target_df[target_df["race_id"] == rid].copy()
+        g = _attach_odds(g, str(rid))
+        g = _add_edge_columns(g)
+        per_race.append(g)
+        time.sleep(SCRAPE_INTERVAL_SEC)
+
+    progress.progress(1.0)
+    progress.empty()
+    status.empty()
+
+    result_df = pd.concat(per_race, ignore_index=True)
     st.session_state["prerace_results"] = result_df
     st.session_state["prerace_results_date"] = str(target_date)
     st.session_state["prerace_results_model"] = model_name
@@ -549,11 +574,21 @@ def _display_pre_race_results(df: pd.DataFrame, target_date: str, model_name: st
             label += "　🎯 順位帯"
 
         with st.expander(label, expanded=is_expanded):
-            # ── 再予測ボタン ──
-            btn_col1, btn_col2 = st.columns([1, 4])
+            # ── 再取得ボタン（オッズのみ / 完全再予測）──
+            btn_col1, btn_col1b, btn_col2 = st.columns([1, 1.2, 3])
             with btn_col1:
-                if st.button("🔄 このレースを再予測", key=f"repredict_{race_id}"):
-                    _repredict_single_race(race_id, target_date, model_name)
+                if st.button("💹 オッズ更新", key=f"refresh_odds_{race_id}",
+                             help="オッズだけ取り直して期待値・エッジを再計算します（数秒）。"
+                                  "AI確率は過去成績ベースなので変わりません。"):
+                    _repredict_single_race(race_id, target_date, model_name,
+                                           rebuild_features=False)
+                    st.rerun()
+            with btn_col1b:
+                if st.button("🔄 完全に再予測", key=f"repredict_{race_id}",
+                             help="出馬表から取り直し、学習と同じパイプラインで特徴量を"
+                                  "再構築します（約2分）。馬体重の発表後に使ってください。"):
+                    _repredict_single_race(race_id, target_date, model_name,
+                                           rebuild_features=True)
                     st.rerun()
             with btn_col2:
                 # 馬体重 + オッズ取得時刻を表示

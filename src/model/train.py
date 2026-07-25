@@ -148,20 +148,27 @@ TARGET_COLUMN = "is_top3"
 MODEL_DIR = PROJECT_ROOT / "models"
 
 
-def prepare_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    """学習用にデータを整形する"""
+def prepare_dataset(df: pd.DataFrame, keep_pending: bool = False) -> pd.DataFrame:
+    """学習用にデータを整形する
+
+    Args:
+        keep_pending: True の場合、予測対象の暫定行 (is_pending=1) は
+            過去データ不足による除外の対象外にする。
+            新馬など履歴の無い馬も予測対象から落とさないため。
+    """
     df = df.copy()
     df[TARGET_COLUMN] = (df["finish_position"] <= 3).astype(int)
 
     # 存在しない特徴量列があれば除外
-    [c for c in FEATURE_COLUMNS if c in df.columns]
     missing = [c for c in FEATURE_COLUMNS if c not in df.columns]
     if missing:
         print(f"  ※ 未生成の特徴量を除外: {missing}")
 
     # 欠損が多い行を除外 (過去データが不足する初期レコード)
-    df = df.dropna(subset=["horse_avg_finish_5", "jockey_win_rate"])
-    return df
+    incomplete = df[["horse_avg_finish_5", "jockey_win_rate"]].isna().any(axis=1)
+    if keep_pending and "is_pending" in df.columns:
+        incomplete &= df["is_pending"] != 1
+    return df[~incomplete]
 
 
 def get_available_features(df: pd.DataFrame) -> list[str]:

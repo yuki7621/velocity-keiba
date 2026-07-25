@@ -79,6 +79,66 @@ def load_results(db_path=DB_PATH) -> pd.DataFrame:
     return df
 
 
+def race_cards_to_pending(cards: list[dict], db_path=DB_PATH) -> pd.DataFrame:
+    """出馬表(scrape_race_card の戻り値)を results 相当の「暫定行」に変換する。
+
+    これを build_all_features(pending_races=...) に渡すことで、
+    予測対象レースを学習と全く同じ特徴量パイプラインで処理できる。
+
+    結果が未確定の列 (finish_position / finish_time_sec / last_3f /
+    passing_order / prize / popularity) は NaN のままにする。
+    暫定行は必ず履歴の末尾（最新日）に来るため、shift(1)+expanding 系の
+    集計に混入して過去の統計を汚すことはない。
+    """
+    rows = []
+    for card in cards:
+        if not card:
+            continue
+        info = card.get("race_info", {})
+        for e in card.get("entries", []):
+            rows.append({
+                "race_id": str(info.get("race_id", "")),
+                "horse_id": e.get("horse_id", ""),
+                "jockey_id": e.get("jockey_id", ""),
+                "trainer_id": e.get("trainer_id", ""),
+                "post_number": e.get("post_number"),
+                "gate_number": e.get("gate_number"),
+                "weight_carried": e.get("weight_carried"),
+                "horse_weight": e.get("horse_weight"),
+                "weight_change": e.get("weight_change"),
+                "sex_age": e.get("sex_age", ""),
+                "horse_name": e.get("horse_name", ""),
+                "jockey_name": e.get("jockey_name", ""),
+                "date": info.get("date"),
+                "venue": info.get("venue"),
+                "surface": info.get("surface"),
+                "distance": info.get("distance"),
+                "condition": info.get("condition"),
+                "title": info.get("title"),
+                "weather": info.get("weather"),
+                "start_time": info.get("start_time", ""),
+                "race_title": info.get("title", ""),
+            })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    # 出走頭数は出馬表の行数から算出
+    df["head_count"] = df.groupby("race_id")["horse_id"].transform("count").astype(float)
+    # 性別は出馬表の性齢 (例: "牝3") の先頭文字
+    df["sex"] = df["sex_age"].map(lambda s: str(s)[0] if s else None)
+
+    # 血統は horses テーブルから引く（学習時と同じ情報源）
+    conn = sqlite3.connect(db_path)
+    ped = pd.read_sql_query("SELECT horse_id, sire, dam_sire FROM horses", conn)
+    conn.close()
+    df = df.merge(ped, on="horse_id", how="left")
+
+    return df
+
+
 # ============================================================
 #  ヘルパー: グループ内のshift→rolling/expanding を高速に計算
 # ============================================================
@@ -787,14 +847,50 @@ def add_basic_features(df: pd.DataFrame) -> pd.DataFrame:
 #  ビルドパイプライン
 # ============================================================
 
-def build_all_features(db_path=DB_PATH) -> pd.DataFrame:
-    """全特徴量を構築してDataFrameを返す（ベクトル化高速版）"""
+def build_all_features(
+    db_path=DB_PATH,
+    pending_races: pd.DataFrame | None = None,
+    exclude_race_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """全特徴量を構築してDataFrameを返す（ベクトル化高速版）
+
+    Args:
+        pending_races: 予測対象の「暫定行」(race_cards_to_pending の戻り値)。
+            渡すと履歴の末尾に連結し、学習と全く同じパイプラインで特徴量を作る。
+            戻り値には is_pending 列が付き、1 の行が予測対象。
+
+            ※ 予測専用の近似実装(predict_features)を使うと、脚質・レース内相対値
+              などが学習時と別物になり AUC が 0.064 も劣化していたため、
+              予測も必ずこの経路を通す。
+
+        exclude_race_ids: 履歴から除外するレースID。
+            過去レースを「まだ実施されていない」ものとして扱い予測を再現する
+            検証用途に使う（同じレースが履歴と暫定行で二重計上されるのを防ぐ）。
+    """
     import time
 
     t0 = time.time()
     print("データ読み込み中...")
     df = load_results(db_path)
+    if exclude_race_ids:
+        ex = {str(r) for r in exclude_race_ids}
+        before = len(df)
+        df = df[~df["race_id"].astype(str).isin(ex)].reset_index(drop=True)
+        print(f"  → 履歴から {before - len(df)}件を除外（検証用）")
+    df["is_pending"] = 0
     print(f"  → {len(df)}件の出走データ")
+
+    if pending_races is not None and len(pending_races) > 0:
+        p = pending_races.copy()
+        p["is_pending"] = 1
+        # 履歴側に無い列は NaN で補い、列順を揃えてから連結する
+        for c in df.columns:
+            if c not in p.columns:
+                p[c] = np.nan
+        extra = [c for c in p.columns if c not in df.columns]
+        df = pd.concat([df, p[list(df.columns) + extra]], ignore_index=True)
+        print(f"  → 予測対象 {len(p)}件を暫定行として追加 "
+              f"({p['race_id'].nunique()}レース)")
 
     def _step(label):
         elapsed = time.time() - t0
