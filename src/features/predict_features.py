@@ -359,6 +359,7 @@ def build_prediction_features(
             "jockey_id": jockey_id,
             "trainer_id": trainer_id,
             "horse_name": entry.get("horse_name", ""),
+            "sex_age": entry.get("sex_age", ""),  # v9: 性別判定用 (例: "牝3")
             "jockey_name": entry.get("jockey_name", ""),
             "trainer_name": entry.get("trainer_name", ""),
             "post_number": entry.get("post_number"),
@@ -421,6 +422,46 @@ def build_prediction_features(
 
     # v8: 展開シナジー特徴量（レース全体の脚質構成 × 自分の脚質）
     df = _add_pace_synergy_features(df)
+
+    # v9: クラス・馬齢・性別・天候
+    df = _add_class_age_features(df, race_info)
+
+    return df
+
+
+def _add_class_age_features(df: pd.DataFrame, race_info: dict) -> pd.DataFrame:
+    """v9: 当該レースのクラス・馬齢・性別・天候。
+
+    build_features.py の add_class_age_features() と同じ定義を使う
+    （判定ロジックは src/features/race_class.py に集約）。
+    prev_race_class / horse_max_class は _get_horse_features 側で算出済み。
+    """
+    from src.features.race_class import (
+        horse_age_from_id,
+        is_named_race,
+        parse_race_class,
+        sex_to_num,
+        weather_to_num,
+    )
+
+    df = df.copy()
+    title = race_info.get("title")
+    race_date = race_info.get("date")
+
+    df["race_class"] = parse_race_class(title)
+    df["is_named_race"] = is_named_race(title)
+    df["class_diff"] = df["race_class"] - df.get(
+        "prev_race_class", pd.Series(np.nan, index=df.index)
+    )
+    df["horse_age"] = [horse_age_from_id(hid, race_date) for hid in df["horse_id"]]
+    # 出馬表の「性齢」(例: 牝3) から性別を取得（無ければ NaN）
+    if "sex_age" in df.columns:
+        df["sex_num"] = df["sex_age"].map(
+            lambda s: sex_to_num(str(s)[0]) if s else np.nan
+        )
+    else:
+        df["sex_num"] = np.nan
+    df["weather_num"] = weather_to_num(race_info.get("weather"))
 
     return df
 
@@ -537,7 +578,7 @@ def _get_horse_features(conn, horse_id: str, race_info: dict, n_races: int = 5) 
     query = f"""
         SELECT r.finish_position, r.finish_time_sec, r.last_3f,
                r.passing_order, r.prize, r.odds,
-               rc.date, rc.distance, rc.surface, rc.venue, rc.condition,
+               rc.date, rc.distance, rc.surface, rc.venue, rc.condition, rc.title,
                -- head_count は races テーブルが NULL の期間があるため、
                -- build_features.py と同様に出走頭数(結果行数)で補完する
                COALESCE(rc.head_count,
@@ -612,6 +653,17 @@ def _get_horse_features(conn, horse_id: str, race_info: dict, n_races: int = 5) 
 
     # 出走回数
     features["horse_race_count"] = len(past)
+
+    # ── v9: 前走クラス / 過去最高クラス ──
+    # past は日付降順なので iloc[0] が前走
+    from src.features.race_class import parse_race_class
+    past_classes = past["title"].map(parse_race_class) if "title" in past.columns else pd.Series(dtype=float)
+    features["prev_race_class"] = (
+        past_classes.iloc[0] if len(past_classes) > 0 else np.nan
+    )
+    features["horse_max_class"] = (
+        past_classes.max() if len(past_classes) > 0 and past_classes.notna().any() else np.nan
+    )
 
     # 前走からの間隔
     if len(past) > 0 and race_info.get("date"):

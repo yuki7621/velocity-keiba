@@ -24,6 +24,7 @@ def load_results(db_path=DB_PATH) -> pd.DataFrame:
             r.passing_order, r.prize,
             rc.date, rc.venue, rc.surface, rc.distance,
             rc.condition, rc.grade, rc.head_count,
+            rc.title, rc.weather,
             h.sire, h.dam_sire,
             pf.payout AS fukusho_payout,
             pt.payout AS tansho_payout
@@ -477,6 +478,66 @@ def add_pace_synergy_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
+#  6d. クラス・馬齢・天候 (v9)
+# ============================================================
+# 競馬予想の基本要素でありながら、これまで特徴量化されていなかった:
+#   - レースクラス（新馬/未勝利/1勝…）と 前走からの昇級・降級
+#   - 馬齢（horse_id 先頭4桁の生年から算出、スクレイプ不要）
+#   - 性別（再スクレイプ後に有効。未取得期間は NaN）
+#   - 天候・出走頭数
+
+def add_class_age_features(df: pd.DataFrame) -> pd.DataFrame:
+    """レースクラス・馬齢・性別・天候の特徴量を作成する"""
+    from src.features.race_class import (
+        horse_age_from_id,
+        is_named_race,
+        parse_race_class,
+        sex_to_num,
+        weather_to_num,
+    )
+
+    df = df.sort_values(["date", "race_id"]).reset_index(drop=True)
+
+    # ── レースクラス ──
+    if "title" in df.columns:
+        df["race_class"] = df["title"].map(parse_race_class)
+        df["is_named_race"] = df["title"].map(is_named_race)
+    else:
+        df["race_class"] = np.nan
+        df["is_named_race"] = np.nan
+
+    # 前走クラスとの差（正=昇級 / 負=降級）。リーク防止に shift(1)
+    df["prev_race_class"] = df.groupby("horse_id")["race_class"].shift(1)
+    df["class_diff"] = df["race_class"] - df["prev_race_class"]
+
+    # その馬が過去に経験した最高クラス（実力の上限を表す）
+    df["horse_max_class"] = (
+        df.groupby("horse_id")["race_class"].shift(1)
+        .groupby(df["horse_id"]).expanding(min_periods=1).max()
+        .droplevel(0).reindex(df.index)
+    )
+
+    # ── 馬齢 ──
+    df["horse_age"] = [
+        horse_age_from_id(hid, d) for hid, d in zip(df["horse_id"], df["date"])
+    ]
+
+    # ── 性別（再スクレイプ後に有効。未取得なら NaN のまま）──
+    if "sex" in df.columns:
+        df["sex_num"] = df["sex"].map(sex_to_num)
+    else:
+        df["sex_num"] = np.nan
+
+    # ── 天候 ──
+    if "weather" in df.columns:
+        df["weather_num"] = df["weather"].map(weather_to_num)
+    else:
+        df["weather_num"] = np.nan
+
+    return df
+
+
+# ============================================================
 #  7. 騎手の特徴量（ベクトル化版）
 # ============================================================
 
@@ -762,6 +823,9 @@ def build_all_features(db_path=DB_PATH) -> pd.DataFrame:
 
     _step("[7b/13] 展開シナジー特徴量を作成中 (v8)...")
     df = add_pace_synergy_features(df)
+
+    _step("[7c/13] クラス・馬齢・天候の特徴量を作成中 (v9)...")
+    df = add_class_age_features(df)
 
     _step("[8/13] 騎手の特徴量を作成中...")
     df = add_jockey_features(df)

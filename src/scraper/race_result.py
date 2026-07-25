@@ -470,21 +470,41 @@ def _parse_results_table(soup: BeautifulSoup, race_id: str) -> list[dict]:
             weight_text = tds[18].get_text(strip=True)
             row.update(_parse_horse_weight(weight_text))
 
-        # 調教師 [22] (例: href="/trainer/result/recent/01126/")
-        if len(tds) > 22:
-            trainer_link = tds[22].select_one("a")
-            if trainer_link:
-                row["trainer_name"] = trainer_link.get_text(strip=True)
-                href = trainer_link.get("href", "")
-                m = re.search(r"/trainer/(?:result/recent/)?(\d+)", href)
-                row["trainer_id"] = m.group(1) if m else ""
-            else:
-                row["trainer_name"] = tds[22].get_text(strip=True)
-                row["trainer_id"] = ""
+        # 調教師: 列位置は会員種別によりズレるため、行全体からリンクを探す
+        # (固定index[22]だと「タイム指数」等の有料列の有無で外れる)
+        row["trainer_name"] = ""
+        row["trainer_id"] = ""
+        trainer_link = tr.select_one("a[href*='/trainer/']")
+        if trainer_link:
+            row["trainer_name"] = trainer_link.get_text(strip=True)
+            m = re.search(r"/trainer/(?:result/recent/)?(\d+)", trainer_link.get("href", ""))
+            row["trainer_id"] = m.group(1) if m else ""
+
+        # 賞金(万円): 常に最終列。カンマ区切りのことがある (例: "1,600.0")
+        row["prize"] = _to_float(tds[-1].get_text(strip=True).replace(",", ""))
+
+        # 性別: 性齢 (例: "牝3") の先頭1文字
+        row.update(_parse_sex_age(row.get("sex_age", "")))
 
         rows.append(row)
 
     return rows
+
+
+def _parse_sex_age(text: str) -> dict:
+    """性齢テキストをパースする (例: '牝3' → {'sex': '牝', 'age': 3})
+
+    馬齢は horse_id 先頭4桁(生年)からも算出できるが、
+    性別はこの列からしか取得できない。
+    """
+    result = {"sex": None, "age": None}
+    if not text:
+        return result
+    m = re.match(r"([牡牝セせん騸]+)\s*(\d+)", str(text).strip())
+    if m:
+        result["sex"] = m.group(1)
+        result["age"] = int(m.group(2))
+    return result
 
 
 def _parse_horse_weight(text: str) -> dict:

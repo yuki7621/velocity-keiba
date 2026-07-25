@@ -83,6 +83,7 @@ def create_tables(db_path=DB_PATH):
             passing_order   TEXT,           -- 通過順 (例: "3-3-2-1")
             prize           REAL,           -- 賞金(万円)
             trainer_id      TEXT,           -- 調教師ID
+            sex             TEXT,           -- 性別 (牡/牝/セ)
             FOREIGN KEY (race_id) REFERENCES races(race_id),
             FOREIGN KEY (horse_id) REFERENCES horses(horse_id),
             FOREIGN KEY (jockey_id) REFERENCES jockeys(jockey_id),
@@ -113,11 +114,15 @@ def create_tables(db_path=DB_PATH):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_payouts_race ON payouts(race_id)")
 
     # 既存DBへの後付けカラム追加（初回のみ実行、既存なら無視）
-    try:
-        cur.execute("ALTER TABLE results ADD COLUMN trainer_id TEXT")
-        conn.commit()
-    except Exception:
-        pass  # already exists
+    for ddl in [
+        "ALTER TABLE results ADD COLUMN trainer_id TEXT",
+        "ALTER TABLE results ADD COLUMN sex TEXT",  # 性別 (牡/牝/セ)
+    ]:
+        try:
+            cur.execute(ddl)
+            conn.commit()
+        except Exception:
+            pass  # already exists
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_results_trainer ON results(trainer_id)")
 

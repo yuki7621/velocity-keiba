@@ -100,8 +100,9 @@ def save_race_data(data: dict, db_path=DB_PATH):
             INSERT OR REPLACE INTO results
             (race_id, horse_id, jockey_id, trainer_id, post_number, gate_number,
              odds, popularity, weight_carried, horse_weight, weight_change,
-             finish_position, finish_time, finish_time_sec, last_3f, passing_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             finish_position, finish_time, finish_time_sec, last_3f, passing_order,
+             prize, sex)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             row.get("race_id"),
             row.get("horse_id"),
@@ -119,6 +120,8 @@ def save_race_data(data: dict, db_path=DB_PATH):
             row.get("finish_time_sec"),
             row.get("last_3f"),
             row.get("passing_order"),
+            row.get("prize"),
+            row.get("sex"),
         ))
 
     # 払戻情報を保存（全券種対応）

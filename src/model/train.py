@@ -129,6 +129,17 @@ FEATURE_COLUMNS = [
     "pace_pressure_x_self_senko",     # ハイペース × 自分の先行率
     "pace_pressure_x_self_oikomi",    # ハイペース × 自分の追込率 (追込有利)
     "n_nigema_x_self_nige",           # 逃げ馬多 × 自分も逃げ = 共倒れリスク
+
+    # --- v9: クラス・馬齢・天候（従来モデルに欠落していた基本要素）---
+    "race_class",                     # レースクラス (0新馬〜5OP)。固有名レースは NaN
+    "is_named_race",                  # 特別/OP/重賞など固有名レースか
+    "prev_race_class",                # 前走のクラス
+    "class_diff",                     # 今走 - 前走 のクラス差 (正=昇級/負=降級)
+    "horse_max_class",                # その馬が過去に経験した最高クラス
+    "horse_age",                      # 馬齢 (horse_id 先頭4桁の生年から算出)
+    "sex_num",                        # 性別 (0牡/1牝/2セ)
+    "weather_num",                    # 天候 (0晴〜5雪)
+    "head_count",                     # 出走頭数
 ]
 
 # 目的変数: 3着以内かどうか
